@@ -1,0 +1,48 @@
+services:
+  nats:
+    image: nats:alpine
+    container_name: fmd-nats
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+    volumes:
+      - nats_data:/data
+
+  fmd-server:
+    build: .
+    container_name: fmd-server
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./lua:/app/lua
+    environment:
+      - RUST_LOG=info
+      - FMD_NATS_URL=nats://nats:4222
+      # Optional: silent bootstrap of initial admin account (wizard will not show if set)
+      # - FMD_ADMIN_USER=admin
+      # - FMD_ADMIN_PASSWORD=change-me-secure-password
+      # - FMD_ADMIN_PASSWORD_FILE=/run/secrets/admin_password
+    depends_on:
+      - nats
+
+  fmd-worker:
+    build: .
+    container_name: fmd-worker
+    restart: unless-stopped
+    command: ["worker", "--nats-url", "nats://nats:4222", "--server-url", "http://fmd-server:8088"]
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./lua:/app/lua
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      - nats
+      - fmd-server
+
+volumes:
+  nats_data:

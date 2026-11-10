@@ -1,0 +1,12 @@
+# cargo-audit configuration for FMD3 San (三)
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: rsa crate Marvin Attack timing sidechannel in PKCS#1 v1.5 decryption.
+    # Unused in FMD3 San: inactive transitive dependency of sqlx-mysql (we exclusively use SQLite).
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0459: libsqlite3-sys bundled C SQLite CVE-2026-119375.
+    # Unaffected in production: FMD3 San links system libsqlite3-0 on Debian/Linux and does not open untrusted external -wal files.
+    "RUSTSEC-2026-0459",
+]

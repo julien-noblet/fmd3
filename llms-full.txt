@@ -1,0 +1,195 @@
+# Free Manga Downloader 3 — San (FMD3 / FMD三) — Comprehensive LLM Context
+
+> Single consolidated documentation context for LLMs, autonomous agents, and AI developers.
+> Language: English | Repository: FMD2 (Rust Edition) | License: GPL-2.0
+
+---
+
+## 1. Project Overview & Capabilities
+
+FMD3 is a high-performance headless daemon, CLI, and modern Web UI rewrite in safe Rust (2021 Edition) of the Free Manga Downloader project.
+- **Operating Environments**: Linux headless servers, Docker containers, Kubernetes homelabs (k3s, microk8s, EKS, GKE), and desktop systems.
+- **Scraper Ecosystem**: 429+ website scraper modules supported out-of-the-box via Lua 5.4 emulation, plus a next-generation WebAssembly (Wasmtime 29) sandboxed engine.
+- **Persistence**: SQLite with Write-Ahead Logging (WAL) and FTS5 full-text search indexing across tens of thousands of manga series.
+- **Task Queue**: In-memory async MPSC queue or distributed NATS JetStream message broker with durable consumer groups and explicit acknowledgement.
+- **E-Reader Integration**: Automatic injection of standard `ComicInfo.xml` metadata into CBZ and EPUB archives (100% compatible with Komga, Kavita, Mihon, and Suwayomi).
+
+---
+
+## 2. Workspace Crates Architecture
+
+The repository is organized as a Cargo workspace with 7 focused crates:
+
+1. `crates/fmd-core`:
+   - Domain models, SQLite connection pool (SQLx), migrations, FTS5 virtual tables.
+   - Archive packager: CBZ (zip) with `ComicInfo.xml`, EPUB with Dublin Core metadata, PDF, and raw directory exporter.
+   - Bilibili puzzle tile image descramblers.
+   - Queue serialization contracts: `TaskMessage`, `TaskKind`, `TaskProgressUpdate`, `TaskCompleteUpdate`.
+   - Multi-source chapter alignment and gap-filling algorithms (`merger.rs`).
+2. `crates/fmd-engine-lua`:
+   - Lua 5.4 VM with complete Pascal FMD2 runtime emulation.
+   - `TXQuery`: HTML/XML DOM parser supporting relative context-node XPath queries: `x.XPathString('.//a/@href', node)`.
+   - `LuaStringList`: Dynamic string array with 0-based and 1-based indexing.
+   - `pb.c`: Native C Protobuf decoder compiled via `build.rs` for binary protobuf payloads (MangaPlus).
+   - Embedded Duktape engine for JavaScript unpacking.
+3. `crates/fmd-engine-wasm`:
+   - Sandboxed Wasmtime 29 runtime with fuel consumption quotas preventing infinite loops.
+   - Memory isolation with linear memory reading and writing boundaries.
+   - C-ABI typed export interface: `fmd_module_info`, `fmd_get_manga`, `fmd_get_pages`, `fmd_apply_filter`.
+4. `crates/fmd-net`:
+   - Resilient Reqwest HTTP client with automated cookie jar and connection pooling.
+   - Reverse image proxy (`/api/proxy/image`) forwarding appropriate `Referer` and `User-Agent` headers.
+   - Hermetic integration test suite with `wiremock`.
+5. `crates/fmd-server`:
+   - Axum HTTP framework with Tokio async workers.
+   - REST API endpoints for modules, favorites, catalog, direct URL inspection, downloads, settings, and proxy.
+   - WebSocket streaming endpoint (`/api/ws`) broadcasting real-time download and catalog sync events.
+   - Hybrid task publisher: internal MPSC or external NATS JetStream.
+6. `crates/fmd-ui`:
+   - Leptos 0.7 SSR single-page application using `tachys` rendering engine.
+   - Modular view components: `Navbar`, `LibraryView`, `CatalogView`, `SearchView`, `MergerView`, `DownloadsView`, `ModulesView`, `SettingsView`.
+   - Defensive JavaScript client runtime with null-safe DOM manipulation.
+7. `crates/fmd-cli`:
+   - Unified executable entrypoint: `fmd serve`, `modules`, `favorites`, `catalog`, `config`, `import-legacy`, `worker`.
+
+---
+
+## 3. Complete REST API Reference
+
+Base URL: `http://localhost:8088`
+
+- `GET /api/modules` -> Array of loaded scrapers `[{id, name, category, root_url, supports_catalog, engine}]`
+- `GET /api/favorites` -> Array of tracked library series with chapter counters and auto-download state
+- `POST /api/favorites` -> Body: `{"module_id": "...", "url": "...", "auto_download": true, "download_format": "CBZ"}`
+- `DELETE /api/favorites/:id` -> Unfollows manga from library (preserves files on disk)
+- `POST /api/favorites/check` -> Triggers immediate background release check for all favorites
+- `POST /api/favorites/:id/settings` -> Updates auto-download or format settings for a favorite
+- `POST /api/manga/inspect` -> Body: `{"module_id": "...", "url": "..."}` -> Returns metadata, cover, summary, authors, and full `chapters` list
+- `GET /api/downloads` -> Returns array of active/queued tasks `[{id, manga_title, chapter_title, status, downloaded_pages, total_pages, retry_count}]`
+- `POST /api/downloads/queue` -> Body: `{"manga_id": "...", "format": "CBZ", "chapters": [{"url": "...", "title": "...", "number": 1.0, "module_id": "..."}]}`
+- `POST /api/downloads/retry-failed` -> Retries all failed downloads
+- `DELETE /api/downloads/:id` -> Cancels or removes download task
+- `GET /api/catalog?query=...&module_id=all&offset=0&limit=50` -> FTS5 full-text query
+- `POST /api/catalog/sync` -> Body: `{"module_id": "..."}` -> Starts background catalog crawler
+- `GET /api/settings` & `POST /api/settings` -> Runtime settings (`download_dir`, `default_format`, `naming_template`, `flaresolverr_url`, `check_interval_hours`)
+- `GET /api/proxy/image?url=<encoded>` -> Image proxy bypassing Cloudflare hotlink protection
+
+### WebSocket Event Stream (`/api/ws`)
+Events are JSON objects: `{"event": "<name>", "payload": { ... }}`
+- `download_started`: `{"task_id": 1, "manga_title": "...", "chapter_title": "..."}`
+- `download_progress`: `{"task_id": 1, "current_page": 5, "total_pages": 19, "percent": 26}`
+- `download_completed`: `{"task_id": 1, "path": "downloads/..."}`
+- `download_failed`: `{"task_id": 1, "error": "..."}`
+- `catalog_sync_progress`: `{"module_id": "...", "current_page": 2, "items_found": 50}`
+- `favorite_updated`: `{"manga_id": "...", "new_chapters_count": 1}`
+
+---
+
+## 4. SQLite Schema & FTS5 Indexing
+
+Pragmas: `journal_mode = WAL`, `foreign_keys = ON`, `busy_timeout = 10000`.
+
+- `mangas`: `(manga_id PK, module_id, title, cover_url, original_url, status, authors, genres, summary, created_at, updated_at)`
+- `favorites`: `(manga_id PK FK, order_index, enabled, current_chapter, save_to, last_checked_at, last_updated_at, auto_download, download_format)`
+- `chapters`: `(chapter_id PK, manga_id FK, title, number, url, module_id, downloaded, downloaded_at, created_at)`
+- `downloads`: `(id PK AUTOINCREMENT, manga_id FK, chapter_url, chapter_title, chapter_number, module_id, format, status, total_pages, downloaded_pages, retry_count, error_message, save_path, created_at, updated_at)`
+- `catalog_fts`: Virtual FTS5 table `(title, module_id UNINDEXED, url UNINDEXED)` with Unicode tokenizer.
+
+---
+
+## 5. Lua Scraper Module Developer Contract
+
+To create a new scraper in `lua/modules/<Name>.lua`:
+
+```lua
+function Init()
+    MODULE.ID          = 'my_module_id'
+    MODULE.Name        = 'My Manga Site'
+    MODULE.RootURL     = 'https://www.example.com'
+    MODULE.Category    = 'English'
+    MODULE.HasCatalog  = true
+end
+
+function GetInfo()
+    local html = HTTP.Get(URL)
+    x.Load(html)
+
+    MANGA.Title   = x.XPathString('//h1/text()')
+    MANGA.Cover   = x.XPathString('//div[@class="cover"]/img/@src')
+    MANGA.Authors = x.XPathString('//span[@class="author"]/text()')
+    MANGA.Summary = x.XPathString('//div[@class="desc"]/text()')
+    MANGA.Status  = x.XPathString('//span[@class="status"]/text()')
+
+    local nodes = x.XPath('//ul[@class="chapters"]/li')
+    for i = 0, nodes.Count - 1 do
+        local node = nodes.Get(i)
+        -- CRITICAL: Always use leading dot for relative queries on context node:
+        local title = x.XPathString('.//a/text()', node)
+        local url   = x.XPathString('.//a/@href', node)
+        url = MaybeFillHost(MODULE.RootURL, url)
+        CHAPTERS:Add(url .. '|' .. title)
+    end
+end
+
+function GetPages()
+    local html = HTTP.Get(URL)
+    x.Load(html)
+
+    local imgs = x.XPath('//div[@class="page-container"]//img')
+    for i = 0, imgs.Count - 1 do
+        local node = imgs.Get(i)
+        local img_url = x.XPathString('.//@data-src', node)
+        if img_url == '' then img_url = x.XPathString('.//@src', node) end
+        if img_url ~= '' then
+            img_url = MaybeFillHost(MODULE.RootURL, img_url)
+            PAGES:Add(img_url .. '|Referer: ' .. URL)
+        end
+    end
+end
+```
+
+---
+
+## 6. CLI Command Cheat-Sheet
+
+```bash
+# Start server daemon
+fmd serve --port 8088 --bind 0.0.0.0
+
+# Scan modules
+fmd modules
+
+# Diagnose module against live URL
+fmd modules --check NovelCool --url "https://www.novelcool.com/novel/One-Piece.html"
+
+# List and check favorites
+fmd favorites --list
+fmd favorites --check --auto-download
+
+# Query FTS5 catalog
+fmd catalog --query "Solo Leveling"
+
+# Synchronize website catalog
+fmd catalog --sync novelcool_fr
+
+# Run standalone worker connected to NATS
+fmd worker --nats nats://localhost:4222 --concurrency 4
+```
+
+---
+
+## 7. Configuration & ComicInfo.xml
+
+Output format: **CBZ** injects standard `ComicInfo.xml` at root:
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Series>One Piece</Series>
+  <Number>1120</Number>
+  <Title>Atlas</Title>
+  <Writer>Eiichiro Oda</Writer>
+  <Manga>YesAndRightToLeft</Manga>
+</ComicInfo>
+```
+Naming template variables: `{manga}`, `{chapter}`, `{title}`, `{number}`, `{ext}`, `{format}`.
+Default: `{manga}/{chapter}.{ext}`.

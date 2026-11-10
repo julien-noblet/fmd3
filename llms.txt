@@ -1,0 +1,59 @@
+# Free Manga Downloader 3 (FMD3 / FMD三) — LLM Documentation Directory
+
+> FMD3 San (三) is a high-performance headless daemon, CLI, and modern Web UI rewrite in Rust of the Free Manga Downloader project. It runs on Linux, Docker, and Kubernetes homelabs, supporting 429+ website scraper modules, dual Lua/WebAssembly engines, SQLite FTS5 catalog search, NATS JetStream distributed queues, and ComicInfo.xml archive packaging for Komga and Kavita.
+
+## Core Capabilities & Architecture
+
+- **Language & Runtime**: 100% safe Rust (2021 edition), Tokio async runtime, Axum HTTP server, Leptos 0.7 SSR frontend.
+- **Dual Scraping Engine**:
+  - Legacy Lua 5.4 VM: Full Pascal FMD2 runtime emulation (`TXQuery`, `LuaStringList`, crypto, Duktape JavaScript engine, C Protobuf `pb.c`).
+  - Next-gen WebAssembly: Sandboxed Wasmtime 29 runtime with fuel metering, linear memory boundaries, and typed host/guest ABI.
+- **Distributed Queue**: Local in-memory queue or distributed NATS JetStream (`fmd worker`).
+- **Storage & Metadata**: SQLite with FTS5 full-text indexing, automatic `ComicInfo.xml` generation for CBZ/EPUB archives.
+- **Cloud-Native Deployment**: Official Helm Chart (`charts/fmd3`), multi-stage Dockerfile, Docker Compose, and Nix Flake.
+
+## Documentation Index
+
+### Technical Documentation
+- [Architecture & Crates Overview](docs/technical/architecture.md): Workspace layout (7 crates), data flow, lifecycle.
+- [REST API & WebSocket Protocol](docs/technical/api-reference.md): All HTTP endpoints, JSON schemas, and WebSocket event payloads.
+- [Scraping Engines (Lua & WASM)](docs/technical/scraping-engines.md): Lua runtime bindings, relative XPath evaluation, Wasmtime guest ABI.
+- [Distributed Task Queue (NATS)](docs/technical/distributed-queue.md): JetStream streams, subjects, worker consumer groups, and ack mechanisms.
+- [Database Schema & Migrations](docs/technical/database-schema.md): SQLite relational schema, FTS5 virtual tables, indexes.
+
+### User Guides
+- [Getting Started Guide](docs/user/getting-started.md): Quick setup with Docker Compose, Helm, Cargo, or Nix Flake.
+- [Web UI User Guide](docs/user/web-ui-guide.md): Library management, FTS5 catalog, URL inspector, multi-source merger, downloads.
+- [CLI Reference Manual](docs/user/cli-reference.md): Comprehensive reference for `fmd serve`, `modules`, `favorites`, `catalog`, `worker`.
+- [Configuration & ComicInfo.xml](docs/user/configuration.md): Naming templates, CBZ/EPUB/PDF formats, Komga/Kavita tags, FlareSolverr.
+
+### AI & LLM Developer Guides
+- [LLM Module Development Guide](docs/llm/module-development-llm.md): Rules, templates, and patterns for LLMs writing new scraper modules.
+- [Autonomous Agent Integration Guide](docs/llm/agent-integration.md): Machine-readable JSON contracts and agentic control workflows.
+- [Full Consolidated LLM Context](llms-full.txt): Complete, consolidated project documentation optimized for context windows.
+
+## CLI Quick Reference
+
+```bash
+# Start daemon & web server on port 8088
+fmd serve --port 8088 --bind 0.0.0.0
+
+# Scan and list all 429+ scraper modules
+fmd modules
+
+# Validate and diagnose a scraper module
+fmd modules --check MangaPlus --url "https://mangaplus.shueisha.co.jp/titles/100020"
+
+# List and check tracked favorite manga
+fmd favorites --list
+fmd favorites --check --auto-download
+
+# Query the local full-text search catalog
+fmd catalog --query "One Piece"
+
+# Synchronize website catalog into SQLite FTS5
+fmd catalog --sync novelcool_fr
+
+# Start a distributed background worker connected to NATS JetStream
+fmd worker --nats nats://localhost:4222 --concurrency 4
+```

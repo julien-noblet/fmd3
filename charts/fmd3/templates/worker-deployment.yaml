@@ -1,0 +1,52 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fmd3.fullname" . }}-worker
+  labels:
+    {{- include "fmd3.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fmd3.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "fmd3.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      containers:
+        - name: fmd3-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["fmd"]
+          args:
+            - "worker"
+            - "--nats-url"
+            - {{ include "fmd3.natsUrl" . | quote }}
+            - "--server-url"
+            - {{ printf "http://%s-server:%d" (include "fmd3.fullname" .) (int .Values.server.port) | quote }}
+            - "--concurrency"
+            - {{ .Values.worker.concurrency | quote }}
+            - "--downloads-dir"
+            - {{ .Values.persistence.downloads.mountPath | quote }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.worker.env.RUST_LOG | quote }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.persistence.downloads.enabled }}
+            - name: downloads
+              mountPath: {{ .Values.persistence.downloads.mountPath }}
+            {{- end }}
+      volumes:
+        {{- if .Values.persistence.downloads.enabled }}
+        - name: downloads
+          persistentVolumeClaim:
+            claimName: {{ include "fmd3.fullname" . }}-downloads
+        {{- end }}
+{{- end }}

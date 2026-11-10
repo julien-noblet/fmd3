@@ -1,0 +1,19 @@
+apiVersion: v2
+name: fmd3
+description: Free Manga Downloader 3 San (三) - Cloud-Native Helm Chart for Kubernetes & Homelabs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - manga
+  - downloader
+  - reader
+  - comicinfo
+  - cbz
+  - komga
+  - kavita
+home: https://github.com/julien-noblet/fmd3
+sources:
+  - https://github.com/julien-noblet/fmd3
+maintainers:
+  - name: FMD Project Team

@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fmd-core",
+    "crates/fmd-net",
+    "crates/fmd-engine-lua",
+    "crates/fmd-engine-wasm",
+    "crates/fmd-server",
+    "crates/fmd-ui",
+    "crates/fmd-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["FMD Project Team", "Julien"]
+license = "GPL-2.0-only"
+repository = "https://github.com/julien-noblet/fmd3"
+
+[workspace.dependencies]
+# Internal crates
+fmd-core = { path = "crates/fmd-core" }
+fmd-net = { path = "crates/fmd-net" }
+fmd-engine-lua = { path = "crates/fmd-engine-lua" }
+fmd-engine-wasm = { path = "crates/fmd-engine-wasm" }
+fmd-server = { path = "crates/fmd-server" }
+fmd-ui = { path = "crates/fmd-ui" }
+
+# Async & Runtime
+tokio = { version = "1.43", features = ["full"] }
+async-trait = "0.1"
+futures-util = "0.3"
+
+# Serialization & Data
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.13", features = ["v4", "serde"] }
+base64 = "0.22"
+
+# Database
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono"] }
+
+# Networking & HTTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "stream", "gzip", "brotli"] }
+url = "2.5"
+
+# Messaging & Broker
+async-nats = "0.48"
+
+# Security & Password Hashing
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+
+# Web Server & UI
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+leptos = { version = "0.7", default-features = false, features = ["ssr"] }
+
+# Scripting & Engines
+mlua = { version = "0.10", features = ["lua54", "vendored", "async", "serialize", "send"] }
+boa_engine = "0.22.0"
+wasmtime = { version = "48.0", default-features = false, features = ["std", "async", "cranelift", "runtime", "anyhow"] }
+wat = "1.229"
+
+# Parsing & Scraping
+regex = "1.11"
+scraper = "0.23"
+skyscraper = "0.7"
+wiremock = "0.6"
+
+# Image & Document Packaging
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
+pdf-writer = "0.15"
+
+# CLI & Logging
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+anyhow = "1.0"

@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fmd3.fullname" . }}-server
+  labels:
+    {{- include "fmd3.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.server.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fmd3.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "fmd3.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      containers:
+        - name: fmd3-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["fmd"]
+          args: ["serve", "--bind", "0.0.0.0:{{ .Values.server.port }}"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.server.env.RUST_LOG | quote }}
+            {{- if or .Values.nats.enabled .Values.nats.customUrl }}
+            - name: FMD_NATS_URL
+              value: {{ include "fmd3.natsUrl" . | quote }}
+            {{- end }}
+            {{- if or .Values.admin.existingSecret (and .Values.admin.username .Values.admin.password) }}
+            - name: FMD_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.admin.existingSecret | default (printf "%s-admin" (include "fmd3.fullname" .)) }}
+                  key: {{ .Values.admin.userSecretKey | default "admin-user" }}
+            - name: FMD_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.admin.existingSecret | default (printf "%s-admin" (include "fmd3.fullname" .)) }}
+                  key: {{ .Values.admin.passwordSecretKey | default "admin-password" }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.persistence.data.enabled }}
+            - name: data
+              mountPath: {{ .Values.persistence.data.mountPath }}
+            {{- end }}
+            {{- if .Values.persistence.downloads.enabled }}
+            - name: downloads
+              mountPath: {{ .Values.persistence.downloads.mountPath }}
+            {{- end }}
+      volumes:
+        {{- if .Values.persistence.data.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "fmd3.fullname" . }}-data
+        {{- end }}
+        {{- if .Values.persistence.downloads.enabled }}
+        - name: downloads
+          persistentVolumeClaim:
+            claimName: {{ include "fmd3.fullname" . }}-downloads
+        {{- end }}

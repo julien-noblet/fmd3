@@ -1,0 +1,56 @@
+{{- if .Values.nats.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fmd3.fullname" . }}-nats
+  labels:
+    {{- include "fmd3.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fmd3.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nats
+  template:
+    metadata:
+      labels:
+        {{- include "fmd3.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nats
+    spec:
+      containers:
+        - name: nats
+          image: "{{ .Values.nats.image.repository }}:{{ .Values.nats.image.tag }}"
+          imagePullPolicy: {{ .Values.nats.image.pullPolicy }}
+          args: ["-js", "-sd", "/data"]
+          ports:
+            - name: nats
+              containerPort: {{ .Values.nats.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: nats-data
+              mountPath: /data
+      volumes:
+        - name: nats-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fmd3.fullname" . }}-nats
+  labels:
+    {{- include "fmd3.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.nats.port }}
+      targetPort: nats
+      protocol: TCP
+      name: nats
+  selector:
+    {{- include "fmd3.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+{{- end }}

@@ -1,0 +1,93 @@
+# Default values for fmd3 Helm Chart.
+
+global:
+  imagePullSecrets: []
+
+image:
+  repository: ghcr.io/fmd-project-team/fmd3
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+server:
+  replicaCount: 1
+  port: 8088
+  resources:
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+  env:
+    RUST_LOG: "info"
+
+worker:
+  enabled: true
+  replicaCount: 2
+  concurrency: 2
+  resources:
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+  env:
+    RUST_LOG: "info"
+
+nats:
+  enabled: true
+  image:
+    repository: nats
+    tag: alpine
+    pullPolicy: IfNotPresent
+  port: 4222
+  jetstream:
+    enabled: true
+    storage: "2Gi"
+  # Set custom URL if connecting to an external NATS cluster
+  customUrl: ""
+
+persistence:
+  data:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 5Gi
+    mountPath: /app/data
+  downloads:
+    enabled: true
+    storageClass: ""
+    # RWX is required so both server and workers can access the shared download archive directory
+    accessMode: ReadWriteMany
+    size: 100Gi
+    mountPath: /app/downloads
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: fmd3.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: fmd3-tls
+  #    hosts:
+  #      - fmd3.local
+
+# Initial Admin Credentials (Optional)
+# If provided, the initial administrator is automatically created silently on first startup,
+# and the Setup Wizard will not be shown.
+# For Kubernetes deployments, credentials can come from an existing Secret (e.g. created with SOPS or sealed-secrets)
+# or directly configured below.
+admin:
+  # Name of an existing Secret in the same namespace
+  existingSecret: ""
+  userSecretKey: "admin-user"
+  passwordSecretKey: "admin-password"
+  # Or provide values directly (creates a secret if existingSecret is empty):
+  username: ""
+  password: ""
