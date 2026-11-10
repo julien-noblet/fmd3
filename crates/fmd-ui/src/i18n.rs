@@ -55,12 +55,32 @@ mod tests {
             let val: serde_json::Value = serde_json::from_str(raw)
                 .unwrap_or_else(|e| panic!("Failed to parse locale {}: {}", code, e));
             assert!(val.get("nav").is_some(), "Locale {} missing 'nav'", code);
-            assert!(val.get("common").is_some(), "Locale {} missing 'common'", code);
+            assert!(
+                val.get("common").is_some(),
+                "Locale {} missing 'common'",
+                code
+            );
             assert!(val.get("auth").is_some(), "Locale {} missing 'auth'", code);
-            assert!(val.get("stats").is_some(), "Locale {} missing 'stats'", code);
-            assert!(val.get("favorites").is_some(), "Locale {} missing 'favorites'", code);
-            assert!(val.get("catalog").is_some(), "Locale {} missing 'catalog'", code);
-            assert!(val.get("settings").is_some(), "Locale {} missing 'settings'", code);
+            assert!(
+                val.get("stats").is_some(),
+                "Locale {} missing 'stats'",
+                code
+            );
+            assert!(
+                val.get("favorites").is_some(),
+                "Locale {} missing 'favorites'",
+                code
+            );
+            assert!(
+                val.get("catalog").is_some(),
+                "Locale {} missing 'catalog'",
+                code
+            );
+            assert!(
+                val.get("settings").is_some(),
+                "Locale {} missing 'settings'",
+                code
+            );
         }
     }
 
@@ -166,7 +186,11 @@ mod tests {
         extract_keys(&en_val, "", &mut en_keys);
 
         let html = crate::render_app_html();
-        for attr in ["data-i18n=\"", "data-i18n-placeholder=\"", "data-i18n-title=\""] {
+        for attr in [
+            "data-i18n=\"",
+            "data-i18n-placeholder=\"",
+            "data-i18n-title=\"",
+        ] {
             let mut rest = html.as_str();
             while let Some(pos) = rest.find(attr) {
                 rest = &rest[pos + attr.len()..];
@@ -189,14 +213,14 @@ mod tests {
             let mut rest = js;
             while let Some(pos) = rest.find(pattern) {
                 // Ensure `t` is not part of an identifier (e.g. `split('` or `getAttribute("`)
-                let valid_Boundary = if pos == 0 {
+                let valid_boundary = if pos == 0 {
                     true
                 } else {
                     let prev = rest[..pos].chars().last().unwrap();
                     !prev.is_alphanumeric() && prev != '_' && prev != '$'
                 };
                 rest = &rest[pos + pattern.len()..];
-                if valid_Boundary {
+                if valid_boundary {
                     if let Some(end) = rest.find(quote) {
                         let key = &rest[..end];
                         if key.contains('.') && !key.contains(' ') {
@@ -233,10 +257,7 @@ mod tests {
             }
         }
 
-        let (_, en_raw) = ALL_LOCALES
-            .iter()
-            .find(|(code, _)| *code == "en")
-            .unwrap();
+        let (_, en_raw) = ALL_LOCALES.iter().find(|(code, _)| *code == "en").unwrap();
         let en_val: serde_json::Value = serde_json::from_str(en_raw).unwrap();
         let mut en_map = HashMap::new();
         extract_map(&en_val, "", &mut en_map);
@@ -253,7 +274,12 @@ mod tests {
             let mut translated = 0;
             for (k, en_str) in &en_map {
                 let loc_str = loc_map.get(k).unwrap();
-                assert!(!loc_str.trim().is_empty(), "Locale '{}' has empty value for '{}'", code, k);
+                assert!(
+                    !loc_str.trim().is_empty(),
+                    "Locale '{}' has empty value for '{}'",
+                    code,
+                    k
+                );
                 if loc_str != en_str {
                     translated += 1;
                 }

@@ -37,7 +37,9 @@ impl ImagePuzzle {
         let total_blocks = self.hor_block * self.ver_block;
 
         if self.matrix.len() < total_blocks as usize {
-            return Err(Error::Custom("Matrix size too small for puzzle dimensions".into()));
+            return Err(Error::Custom(
+                "Matrix size too small for puzzle dimensions".into(),
+            ));
         }
 
         let (block_width, block_height) = if self.multiply <= 1 {
@@ -55,7 +57,10 @@ impl ImagePuzzle {
         for i in 0..total_blocks {
             let target_idx = self.matrix[i as usize];
             if target_idx >= total_blocks {
-                return Err(Error::Custom(format!("Matrix value {} out of bounds", target_idx)));
+                return Err(Error::Custom(format!(
+                    "Matrix value {} out of bounds",
+                    target_idx
+                )));
             }
 
             // Destination coords
@@ -70,8 +75,12 @@ impl ImagePuzzle {
             let sx = src_col * block_width;
             let sy = src_row * block_height;
 
-            let tile_w = block_width.min(width.saturating_sub(sx)).min(width.saturating_sub(dx));
-            let tile_h = block_height.min(height.saturating_sub(sy)).min(height.saturating_sub(dy));
+            let tile_w = block_width
+                .min(width.saturating_sub(sx))
+                .min(width.saturating_sub(dx));
+            let tile_h = block_height
+                .min(height.saturating_sub(sy))
+                .min(height.saturating_sub(dy));
 
             if tile_w == 0 || tile_h == 0 {
                 continue;

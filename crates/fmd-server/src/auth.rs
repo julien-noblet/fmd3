@@ -25,10 +25,12 @@ use tracing::{info, warn};
 // ANTI-BRUTE-FORCE LOGIN RATE LIMITER
 // ==========================================
 
+type AttemptEntry = (u32, Option<Instant>, Instant);
+
 #[derive(Clone, Default)]
 pub struct LoginRateLimiter {
     // IP -> (failure_count, locked_until, last_attempt)
-    attempts: Arc<Mutex<HashMap<String, (u32, Option<Instant>, Instant)>>>,
+    attempts: Arc<Mutex<HashMap<String, AttemptEntry>>>,
 }
 
 impl LoginRateLimiter {
@@ -40,13 +42,11 @@ impl LoginRateLimiter {
 
     pub async fn check_allowed(&self, ip: &str) -> Result<(), u64> {
         let guard = self.attempts.lock().await;
-        if let Some((_failures, locked_until, _)) = guard.get(ip) {
-            if let Some(lock_time) = locked_until {
-                let now = Instant::now();
-                if now < *lock_time {
-                    let remaining = (*lock_time - now).as_secs().max(1);
-                    return Err(remaining);
-                }
+        if let Some((_failures, Some(lock_time), _)) = guard.get(ip) {
+            let now = Instant::now();
+            if now < *lock_time {
+                let remaining = (*lock_time - now).as_secs().max(1);
+                return Err(remaining);
             }
         }
         Ok(())
@@ -89,7 +89,10 @@ pub fn extract_client_ip(headers: &HeaderMap) -> String {
 }
 
 pub fn is_request_secure(headers: &HeaderMap) -> bool {
-    if let Some(proto) = headers.get("x-forwarded-proto").and_then(|h| h.to_str().ok()) {
+    if let Some(proto) = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+    {
         if proto.eq_ignore_ascii_case("https") {
             return true;
         }
@@ -152,7 +155,10 @@ pub async fn bootstrap_admin_from_env_or_secret(db: &Database) -> anyhow::Result
         match std::fs::read_to_string(&file_path) {
             Ok(content) => Some(content.trim().to_string()),
             Err(e) => {
-                warn!("Failed to read FMD_ADMIN_PASSWORD_FILE from {}: {}", file_path, e);
+                warn!(
+                    "Failed to read FMD_ADMIN_PASSWORD_FILE from {}: {}",
+                    file_path, e
+                );
                 None
             }
         }
@@ -164,9 +170,15 @@ pub async fn bootstrap_admin_from_env_or_secret(db: &Database) -> anyhow::Result
         let username = username.trim();
         let password = password.trim();
         if !username.is_empty() && !password.is_empty() {
-            info!("Bootstrapping initial admin user '{}' from environment/secret...", username);
+            info!(
+                "Bootstrapping initial admin user '{}' from environment/secret...",
+                username
+            );
             db.create_initial_admin(username, password).await?;
-            info!("Initial admin user '{}' bootstrapped successfully", username);
+            info!(
+                "Initial admin user '{}' bootstrapped successfully",
+                username
+            );
         }
     } else {
         info!("No admin credentials provided via environment or secret. Interactive setup wizard will be available on Web UI.");
@@ -358,7 +370,12 @@ pub async fn auth_setup(
         .db
         .create_initial_admin(username, password)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Erreur création admin: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Erreur création admin: {}", e),
+            )
+        })?;
 
     let perms = state
         .db
@@ -408,7 +425,10 @@ pub async fn auth_login(
     if let Err(remaining_secs) = state.login_rate_limiter.check_allowed(&client_ip).await {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
-            format!("Trop de tentatives échouées. Veuillez patienter {} secondes.", remaining_secs),
+            format!(
+                "Trop de tentatives échouées. Veuillez patienter {} secondes.",
+                remaining_secs
+            ),
         ));
     }
 
@@ -423,14 +443,20 @@ pub async fn auth_login(
         Some(u) if u.is_active => u,
         _ => {
             state.login_rate_limiter.record_failure(&client_ip).await;
-            return Err((StatusCode::UNAUTHORIZED, "Identifiant ou mot de passe incorrect".into()));
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Identifiant ou mot de passe incorrect".into(),
+            ));
         }
     };
 
     let pwd_hash = user.password_hash.as_deref().unwrap_or_default();
     if !auth::verify_password(&req.password, pwd_hash) {
         state.login_rate_limiter.record_failure(&client_ip).await;
-        return Err((StatusCode::UNAUTHORIZED, "Identifiant ou mot de passe incorrect".into()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Identifiant ou mot de passe incorrect".into(),
+        ));
     }
 
     // Login succeeded, clear failed attempt counters

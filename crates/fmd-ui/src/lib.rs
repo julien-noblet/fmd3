@@ -104,7 +104,8 @@ mod tests {
         // Validate JavaScript syntax and execution using node if node is present
         if let Ok(mut child) = std::process::Command::new("node")
             .arg("-e")
-            .arg(r#"
+            .arg(
+                r#"
 const vm = require('vm');
 let code = '';
 process.stdin.on('data', d => code += d);
@@ -138,14 +139,17 @@ process.stdin.on('end', async () => {
         process.exit(1);
     }
 });
-"#)
+"#,
+            )
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
         {
             use std::io::Write;
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(client_script::CLIENT_SCRIPT.as_bytes()).unwrap();
+                stdin
+                    .write_all(client_script::CLIENT_SCRIPT.as_bytes())
+                    .unwrap();
             }
             let output = child.wait_with_output().unwrap();
             let stderr = String::from_utf8_lossy(&output.stderr);

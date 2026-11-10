@@ -80,7 +80,10 @@ pub struct WasmInstance {
 impl WasmInstance {
     /// Helper to allocate memory in the WASM guest if `_fmd_alloc` is exported
     pub fn alloc(&mut self, size: usize) -> Result<i32> {
-        if let Ok(alloc_fn) = self.instance.get_typed_func::<i32, i32>(&mut self.store, "_fmd_alloc") {
+        if let Ok(alloc_fn) = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, "_fmd_alloc")
+        {
             let ptr = alloc_fn.call(&mut self.store, size as i32)?;
             Ok(ptr)
         } else {
@@ -100,7 +103,12 @@ impl WasmInstance {
         let start = ptr as usize;
         let end = start + len;
         if end > data.len() {
-            return Err(anyhow!("Dépassement mémoire lors de la lecture (ptr={}, len={}, total={})", ptr, len, data.len()));
+            return Err(anyhow!(
+                "Dépassement mémoire lors de la lecture (ptr={}, len={}, total={})",
+                ptr,
+                len,
+                data.len()
+            ));
         }
         Ok(data[start..end].to_vec())
     }
@@ -116,7 +124,12 @@ impl WasmInstance {
         let start = ptr as usize;
         let end = start + bytes.len();
         if end > data.len() {
-            return Err(anyhow!("Dépassement mémoire lors de l'écriture (ptr={}, len={}, total={})", ptr, bytes.len(), data.len()));
+            return Err(anyhow!(
+                "Dépassement mémoire lors de l'écriture (ptr={}, len={}, total={})",
+                ptr,
+                bytes.len(),
+                data.len()
+            ));
         }
         data[start..end].copy_from_slice(bytes);
         Ok(())
@@ -146,8 +159,12 @@ impl WasmInstance {
         let out_len = (ret & 0xFFFF_FFFF) as usize;
 
         let out_bytes = self.read_bytes(out_ptr, out_len)?;
-        let result: O = serde_json::from_slice(&out_bytes)
-            .with_context(|| format!("Échec de désérialisation de la réponse JSON de '{}'", func_name))?;
+        let result: O = serde_json::from_slice(&out_bytes).with_context(|| {
+            format!(
+                "Échec de désérialisation de la réponse JSON de '{}'",
+                func_name
+            )
+        })?;
 
         Ok(result)
     }
@@ -170,7 +187,12 @@ impl WasmInstance {
     }
 
     /// Process image through WASM filter
-    pub fn process_image(&mut self, image_bytes: &[u8], _filename: &str, _format: &str) -> Result<Vec<u8>> {
+    pub fn process_image(
+        &mut self,
+        image_bytes: &[u8],
+        _filename: &str,
+        _format: &str,
+    ) -> Result<Vec<u8>> {
         let _ = self.store.set_fuel(20_000_000);
 
         let ptr = self.alloc(image_bytes.len())?;

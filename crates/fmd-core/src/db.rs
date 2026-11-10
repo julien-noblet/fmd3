@@ -13,9 +13,10 @@ pub struct Database {
 
 impl Database {
     pub async fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        let db_str = db_path.as_ref().to_str().ok_or_else(|| {
-            Error::Custom("Invalid database path".into())
-        })?;
+        let db_str = db_path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| Error::Custom("Invalid database path".into()))?;
 
         if let Some(parent) = db_path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
@@ -210,13 +211,35 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
-        let _ = sqlx::query("ALTER TABLE favorites ADD COLUMN auto_download BOOLEAN NOT NULL DEFAULT 0").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE favorites ADD COLUMN download_format TEXT NOT NULL DEFAULT 'CBZ'").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE favorites ADD COLUMN user_id TEXT DEFAULT NULL").execute(&self.pool).await;
-        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id)").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE downloads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE downloads ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3").execute(&self.pool).await;
-        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_chapters_manga_url ON chapters(manga_id, url)").execute(&self.pool).await;
+        let _ = sqlx::query(
+            "ALTER TABLE favorites ADD COLUMN auto_download BOOLEAN NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE favorites ADD COLUMN download_format TEXT NOT NULL DEFAULT 'CBZ'",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query("ALTER TABLE favorites ADD COLUMN user_id TEXT DEFAULT NULL")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id)")
+            .execute(&self.pool)
+            .await;
+        let _ =
+            sqlx::query("ALTER TABLE downloads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await;
+        let _ =
+            sqlx::query("ALTER TABLE downloads ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3")
+                .execute(&self.pool)
+                .await;
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_chapters_manga_url ON chapters(manga_id, url)",
+        )
+        .execute(&self.pool)
+        .await;
         let _ = sqlx::query("INSERT OR IGNORE INTO module_cache_policies (module_id, ttl_value, ttl_unit, min_delay_ms) VALUES ('*', 24, 'hours', 1000)").execute(&self.pool).await;
 
         Ok(())
@@ -224,9 +247,10 @@ impl Database {
 
     /// Import legacy FMD2 userdata SQLite database
     pub async fn import_legacy_db<P: AsRef<Path>>(&self, legacy_path: P) -> Result<usize> {
-        let path_str = legacy_path.as_ref().to_str().ok_or_else(|| {
-            Error::Custom("Invalid legacy path".into())
-        })?;
+        let path_str = legacy_path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| Error::Custom("Invalid legacy path".into()))?;
 
         let conn_str = format!("sqlite://{}?mode=ro", path_str);
         let legacy_pool = SqlitePoolOptions::new()
@@ -412,22 +436,24 @@ impl Database {
                 .await?
             };
 
-            let items = rows.into_iter().map(|r| {
-                crate::models::CatalogItem {
+            let items = rows
+                .into_iter()
+                .map(|r| crate::models::CatalogItem {
                     id: r.get("id"),
                     module_id: r.get("module_id"),
                     title: r.get("title"),
                     link: r.get("link"),
                     cover_url: r.get("cover_url"),
                     updated_at: r.get("updated_at"),
-                }
-            }).collect();
+                })
+                .collect();
 
             return Ok((items, total_row.0));
         }
 
         // FTS5 search with fallback to LIKE
-        let fts_query = q.split_whitespace()
+        let fts_query = q
+            .split_whitespace()
             .map(|word| {
                 let clean: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
                 if clean.is_empty() {
@@ -508,16 +534,17 @@ impl Database {
                 .unwrap_or((rows.len() as i64,))
             };
 
-            let items = rows.into_iter().map(|r| {
-                crate::models::CatalogItem {
+            let items = rows
+                .into_iter()
+                .map(|r| crate::models::CatalogItem {
                     id: r.get("id"),
                     module_id: r.get("module_id"),
                     title: r.get("title"),
                     link: r.get("link"),
                     cover_url: r.get("cover_url"),
                     updated_at: r.get("updated_at"),
-                }
-            }).collect();
+                })
+                .collect();
 
             return Ok((items, total_count.0));
         }
@@ -570,21 +597,25 @@ impl Database {
             .await?
         };
 
-        let items = rows.into_iter().map(|r| {
-            crate::models::CatalogItem {
+        let items = rows
+            .into_iter()
+            .map(|r| crate::models::CatalogItem {
                 id: r.get("id"),
                 module_id: r.get("module_id"),
                 title: r.get("title"),
                 link: r.get("link"),
                 cover_url: r.get("cover_url"),
                 updated_at: r.get("updated_at"),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok((items, total_row.0))
     }
 
-    pub async fn get_module_sync_status(&self, module_id: &str) -> Result<Option<crate::models::ModuleSyncStatus>> {
+    pub async fn get_module_sync_status(
+        &self,
+        module_id: &str,
+    ) -> Result<Option<crate::models::ModuleSyncStatus>> {
         let row_opt = sqlx::query(
             "SELECT module_id, total_mangas, status, last_synced_at, error_message FROM module_sync_status WHERE module_id = ?1"
         )
@@ -661,6 +692,7 @@ impl Database {
         Ok(row.0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_manga_metadata(
         &self,
         manga_id: &str,
@@ -701,6 +733,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_or_update_favorite(
         &self,
         manga_id: &str,
@@ -726,6 +759,7 @@ impl Database {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_or_update_favorite_with_meta(
         &self,
         manga_id: &str,
@@ -755,6 +789,7 @@ impl Database {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_or_update_favorite_with_meta_for_user(
         &self,
         user_id: Option<&str>,
@@ -882,10 +917,12 @@ impl Database {
                 .execute(&self.pool)
                 .await?;
         } else {
-            sqlx::query("UPDATE favorites SET last_checked_at = CURRENT_TIMESTAMP WHERE manga_id = ?1")
-                .bind(manga_id)
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "UPDATE favorites SET last_checked_at = CURRENT_TIMESTAMP WHERE manga_id = ?1",
+            )
+            .bind(manga_id)
+            .execute(&self.pool)
+            .await?;
         }
 
         Ok(new_chapters)
@@ -928,7 +965,10 @@ impl Database {
         self.list_favorites_for_user(None).await
     }
 
-    pub async fn list_favorites_for_user(&self, user_id: Option<&str>) -> Result<Vec<crate::models::Favorite>> {
+    pub async fn list_favorites_for_user(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::models::Favorite>> {
         let rows = match user_id {
             Some(uid) => {
                 sqlx::query(
@@ -1038,7 +1078,7 @@ impl Database {
 
     pub async fn list_manga_chapters(&self, manga_id: &str) -> Result<Vec<(String, String, bool)>> {
         let rows = sqlx::query(
-            "SELECT title, url, is_downloaded FROM chapters WHERE manga_id = ?1 ORDER BY rowid ASC"
+            "SELECT title, url, is_downloaded FROM chapters WHERE manga_id = ?1 ORDER BY rowid ASC",
         )
         .bind(manga_id)
         .fetch_all(&self.pool)
@@ -1101,12 +1141,24 @@ impl Database {
     }
 
     pub async fn update_settings(&self, settings: &crate::models::AppSettings) -> Result<()> {
-        self.set_setting("download_dir", &settings.download_dir).await?;
-        self.set_setting("default_format", &settings.default_format).await?;
-        self.set_setting("naming_template", &settings.naming_template).await?;
-        self.set_setting("flaresolverr_url", &settings.flaresolverr_url).await?;
-        self.set_setting("check_interval_hours", &settings.check_interval_hours.to_string()).await?;
-        self.set_setting("catalog_resync_days", &settings.catalog_resync_days.to_string()).await?;
+        self.set_setting("download_dir", &settings.download_dir)
+            .await?;
+        self.set_setting("default_format", &settings.default_format)
+            .await?;
+        self.set_setting("naming_template", &settings.naming_template)
+            .await?;
+        self.set_setting("flaresolverr_url", &settings.flaresolverr_url)
+            .await?;
+        self.set_setting(
+            "check_interval_hours",
+            &settings.check_interval_hours.to_string(),
+        )
+        .await?;
+        self.set_setting(
+            "catalog_resync_days",
+            &settings.catalog_resync_days.to_string(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1392,26 +1444,34 @@ impl Database {
         }
 
         if let Some(active) = is_active {
-            sqlx::query("UPDATE users SET is_active = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2")
-                .bind(active)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE users SET is_active = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            )
+            .bind(active)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         }
 
         if let Some(hash) = pwd_hash {
-            sqlx::query("UPDATE users SET password_hash = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2")
-                .bind(hash)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE users SET password_hash = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            )
+            .bind(hash)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         }
 
         tx.commit().await?;
         Ok(())
     }
 
-    pub async fn update_user_permissions(&self, user_id: &str, permissions: &UserPermissions) -> Result<()> {
+    pub async fn update_user_permissions(
+        &self,
+        user_id: &str,
+        permissions: &UserPermissions,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO user_permissions (user_id, can_download, can_manage_favorites, can_trigger_catalog_sync, can_force_refresh, can_view_modules)
@@ -1527,10 +1587,12 @@ impl Database {
                     last_login_at: r.get("last_login_at"),
                     is_active: true,
                 };
-                let _ = sqlx::query("UPDATE user_sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?1")
-                    .bind(session_id)
-                    .execute(&self.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE user_sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                )
+                .bind(session_id)
+                .execute(&self.pool)
+                .await;
 
                 let permissions = self.get_user_permissions(&user_id).await?;
                 return Ok(Some(AuthContext {
@@ -1560,10 +1622,11 @@ impl Database {
         if let Some(r) = token_row {
             let expires_at: Option<chrono::DateTime<Utc>> = r.get("expires_at");
             let is_active: bool = r.get("is_active");
-            let is_valid = is_active && match expires_at {
-                Some(exp) => exp > now,
-                None => true,
-            };
+            let is_valid = is_active
+                && match expires_at {
+                    Some(exp) => exp > now,
+                    None => true,
+                };
 
             if is_valid {
                 let token_id: String = r.get("token_id");
@@ -1581,10 +1644,12 @@ impl Database {
                     last_login_at: r.get("last_login_at"),
                     is_active: true,
                 };
-                let _ = sqlx::query("UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?1")
-                    .bind(token_id)
-                    .execute(&self.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                )
+                .bind(token_id)
+                .execute(&self.pool)
+                .await;
 
                 let permissions = self.get_user_permissions(&user_id).await?;
                 return Ok(Some(AuthContext {
@@ -1648,7 +1713,10 @@ impl Database {
         ))
     }
 
-    pub async fn list_api_tokens_for_user(&self, user_id: &str) -> Result<Vec<crate::auth::ApiToken>> {
+    pub async fn list_api_tokens_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<crate::auth::ApiToken>> {
         let rows = sqlx::query(
             "SELECT id, token_hash, user_id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ?1 ORDER BY created_at DESC"
         )
@@ -1847,11 +1915,20 @@ mod tests {
 
         // Test catalog upsert and search
         let items = vec![
-            ("Jujutsu Kaisen".to_string(), "novel/Jujutsu-Kaisen.html".to_string()),
+            (
+                "Jujutsu Kaisen".to_string(),
+                "novel/Jujutsu-Kaisen.html".to_string(),
+            ),
             ("One Piece".to_string(), "novel/One-Piece.html".to_string()),
-            ("Chainsaw Man".to_string(), "novel/Chainsaw-Man.html".to_string()),
+            (
+                "Chainsaw Man".to_string(),
+                "novel/Chainsaw-Man.html".to_string(),
+            ),
         ];
-        let count = db.upsert_catalog_items("NovelCoolFR", &items).await.unwrap();
+        let count = db
+            .upsert_catalog_items("NovelCoolFR", &items)
+            .await
+            .unwrap();
         assert_eq!(count, 3);
 
         let (search_res, total) = db.search_catalog("jujutsu", None, 10, 0).await.unwrap();
@@ -1859,8 +1936,14 @@ mod tests {
         assert_eq!(search_res[0].title, "Jujutsu Kaisen");
 
         // Test module sync status
-        db.set_module_sync_status("NovelCoolFR", "Completed", None, Some(3)).await.unwrap();
-        let status = db.get_module_sync_status("NovelCoolFR").await.unwrap().unwrap();
+        db.set_module_sync_status("NovelCoolFR", "Completed", None, Some(3))
+            .await
+            .unwrap();
+        let status = db
+            .get_module_sync_status("NovelCoolFR")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(status.status, "Completed");
         assert_eq!(status.total_mangas, 3);
 
@@ -1878,25 +1961,45 @@ mod tests {
         .unwrap();
 
         let initial_chapters = vec![
-            crate::models::ChapterItem { title: "Ch 1".into(), url: "ch1".into() },
-            crate::models::ChapterItem { title: "Ch 2".into(), url: "ch2".into() },
+            crate::models::ChapterItem {
+                title: "Ch 1".into(),
+                url: "ch1".into(),
+            },
+            crate::models::ChapterItem {
+                title: "Ch 2".into(),
+                url: "ch2".into(),
+            },
         ];
         // Record initial chapters marked as already seen/downloaded
-        db.record_chapters("m1", &initial_chapters, true).await.unwrap();
+        db.record_chapters("m1", &initial_chapters, true)
+            .await
+            .unwrap();
 
         let favs = db.list_favorites_with_stats().await.unwrap();
         assert_eq!(favs.len(), 1);
         assert_eq!(favs[0].total_chapters, 2);
         assert_eq!(favs[0].downloaded_chapters_count, 2);
-        assert_eq!(favs[0].auto_download, true);
+        assert!(favs[0].auto_download);
 
         // Simulate chapter update: Ch 3 is released!
         let updated_chapters = vec![
-            crate::models::ChapterItem { title: "Ch 1".into(), url: "ch1".into() },
-            crate::models::ChapterItem { title: "Ch 2".into(), url: "ch2".into() },
-            crate::models::ChapterItem { title: "Ch 3".into(), url: "ch3".into() },
+            crate::models::ChapterItem {
+                title: "Ch 1".into(),
+                url: "ch1".into(),
+            },
+            crate::models::ChapterItem {
+                title: "Ch 2".into(),
+                url: "ch2".into(),
+            },
+            crate::models::ChapterItem {
+                title: "Ch 3".into(),
+                url: "ch3".into(),
+            },
         ];
-        let new_chaps = db.check_favorite_new_chapters("m1", &updated_chapters).await.unwrap();
+        let new_chaps = db
+            .check_favorite_new_chapters("m1", &updated_chapters)
+            .await
+            .unwrap();
         assert_eq!(new_chaps.len(), 1);
         assert_eq!(new_chaps[0].title, "Ch 3");
 
@@ -1931,7 +2034,10 @@ mod tests {
         .unwrap();
 
         // 2. Create initial admin
-        let admin = db.create_initial_admin("superadmin", "P@ssw0rd123!").await.unwrap();
+        let admin = db
+            .create_initial_admin("superadmin", "P@ssw0rd123!")
+            .await
+            .unwrap();
         assert_eq!(admin.username, "superadmin");
         assert_eq!(admin.role, Role::Admin);
         assert_eq!(db.count_users().await.unwrap(), 1);
@@ -1964,24 +2070,42 @@ mod tests {
 
         // Reader shouldn't have bleach if user-filtered (unless legacy unassigned)
         let perms = db.get_user_permissions(&user.id).await.unwrap();
-        assert_eq!(perms.can_trigger_catalog_sync, false);
+        assert!(!perms.can_trigger_catalog_sync);
 
         // 4. Session authentication
-        let session_token = db.create_session(&user.id, Some("Firefox/130"), Some("127.0.0.1"), 7).await.unwrap();
-        let auth_ctx = db.validate_session_or_token(&session_token).await.unwrap().expect("session should be valid");
+        let session_token = db
+            .create_session(&user.id, Some("Firefox/130"), Some("127.0.0.1"), 7)
+            .await
+            .unwrap();
+        let auth_ctx = db
+            .validate_session_or_token(&session_token)
+            .await
+            .unwrap()
+            .expect("session should be valid");
         assert_eq!(auth_ctx.user.id, user.id);
-        assert_eq!(auth_ctx.permissions.can_download, true);
-        assert_eq!(auth_ctx.is_api_token, false);
+        assert!(auth_ctx.permissions.can_download);
+        assert!(!auth_ctx.is_api_token);
 
         // Delete session
         db.delete_session(&session_token).await.unwrap();
-        assert!(db.validate_session_or_token(&session_token).await.unwrap().is_none());
+        assert!(db
+            .validate_session_or_token(&session_token)
+            .await
+            .unwrap()
+            .is_none());
 
         // 5. API Token authentication
-        let (raw_api_token, _token_meta) = db.create_api_token(&admin.id, "ci-token", Some(30)).await.unwrap();
-        let api_ctx = db.validate_session_or_token(&raw_api_token).await.unwrap().expect("api token should be valid");
+        let (raw_api_token, _token_meta) = db
+            .create_api_token(&admin.id, "ci-token", Some(30))
+            .await
+            .unwrap();
+        let api_ctx = db
+            .validate_session_or_token(&raw_api_token)
+            .await
+            .unwrap()
+            .expect("api token should be valid");
         assert_eq!(api_ctx.user.id, admin.id);
-        assert_eq!(api_ctx.is_api_token, true);
+        assert!(api_ctx.is_api_token);
 
         // 6. Cache policies
         let default_policy = db.get_module_cache_policy("mangadex").await.unwrap();
@@ -2014,7 +2138,11 @@ mod tests {
         };
         db.save_manga_cache(&cache_item).await.unwrap();
 
-        let cached = db.get_manga_cache("mangadex:12345").await.unwrap().expect("cache should exist");
+        let cached = db
+            .get_manga_cache("mangadex:12345")
+            .await
+            .unwrap()
+            .expect("cache should exist");
         assert_eq!(cached.title, "Chainsaw Man");
         assert!(!cached.is_expired());
     }

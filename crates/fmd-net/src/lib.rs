@@ -111,7 +111,9 @@ impl HttpClient {
         url: &str,
         custom_headers: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<u8>> {
-        let (status, bytes) = self.get_bytes_and_status_with_headers(url, custom_headers).await?;
+        let (status, bytes) = self
+            .get_bytes_and_status_with_headers(url, custom_headers)
+            .await?;
         if status >= 400 {
             return Err(NetError::Other(format!("HTTP error {} on {}", status, url)));
         }

@@ -5,9 +5,8 @@ pub fn register_crypto(lua: &Lua) -> LuaResult<()> {
     let crypto_table = lua.create_table()?;
 
     // Base64 encode
-    let encode_base64 = lua.create_function(|_, data: String| {
-        Ok(BASE64_STANDARD.encode(data.as_bytes()))
-    })?;
+    let encode_base64 =
+        lua.create_function(|_, data: String| Ok(BASE64_STANDARD.encode(data.as_bytes())))?;
 
     // Base64 decode
     let decode_base64 = lua.create_function(|lua, data: String| {
@@ -15,14 +14,15 @@ pub fn register_crypto(lua: &Lua) -> LuaResult<()> {
         let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
         match BASE64_STANDARD.decode(cleaned.as_bytes()) {
             Ok(bytes) => Ok(lua.create_string(&bytes)?),
-            Err(e) => Err(mlua::Error::RuntimeError(format!("Base64 decode error: {}", e))),
+            Err(e) => Err(mlua::Error::RuntimeError(format!(
+                "Base64 decode error: {}",
+                e
+            ))),
         }
     })?;
 
     // MD5
-    let md5_fn = lua.create_function(|_, s: String| {
-        Ok(format!("{:x}", md5_hash(s.as_bytes())))
-    })?;
+    let md5_fn = lua.create_function(|_, s: String| Ok(format!("{:x}", md5_hash(s.as_bytes()))))?;
 
     // HexToStr (binary bytes from hex string)
     let hex_to_str = lua.create_function(|lua, hex: String| {
@@ -41,7 +41,11 @@ pub fn register_crypto(lua: &Lua) -> LuaResult<()> {
 
     // StrToHex (hex string from binary bytes)
     let str_to_hex = lua.create_function(|_, data: mlua::String| {
-        let hex: String = data.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        let hex: String = data
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         Ok(hex)
     })?;
 

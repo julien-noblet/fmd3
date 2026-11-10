@@ -8,14 +8,13 @@ pub fn register_duktape(lua: &Lua) -> LuaResult<()> {
         let mut context = Context::default();
         match context.eval(Source::from_bytes(&code)) {
             Ok(val) => {
-                let s = val.to_string(&mut context)
+                let s = val
+                    .to_string(&mut context)
                     .map(|js_str| js_str.to_std_string_escaped())
                     .unwrap_or_else(|_| "undefined".to_string());
                 Ok(s)
             }
-            Err(e) => {
-                Ok(format!("Error: {}", e))
-            }
+            Err(e) => Ok(format!("Error: {}", e)),
         }
     })?;
 

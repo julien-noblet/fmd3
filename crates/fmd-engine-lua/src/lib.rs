@@ -98,9 +98,12 @@ impl LuaModuleEngine {
         }
 
         // Restrict io.open to safe project/module paths
-        if let Ok(original_open) = lua.load("return io and io.open").eval::<Option<mlua::Function>>() {
-            if let Some(orig) = original_open {
-                let safe_open = lua.create_function(move |_lua, (path, mode): (String, Option<String>)| {
+        if let Ok(Some(orig)) = lua
+            .load("return io and io.open")
+            .eval::<Option<mlua::Function>>()
+        {
+            let safe_open =
+                lua.create_function(move |_lua, (path, mode): (String, Option<String>)| {
                     let p = path.to_lowercase();
                     if p.starts_with("/etc")
                         || p.starts_with("/proc")
@@ -119,9 +122,8 @@ impl LuaModuleEngine {
                     }
                     orig.call::<mlua::Value>((path, mode))
                 })?;
-                if let Ok(io_tbl) = globals.get::<Table>("io") {
-                    let _ = io_tbl.set("open", safe_open);
-                }
+            if let Ok(io_tbl) = globals.get::<Table>("io") {
+                let _ = io_tbl.set("open", safe_open);
             }
         }
 
@@ -169,15 +171,16 @@ impl LuaModuleEngine {
         })?;
         globals.set("Trim", trim_fn)?;
 
-        let mangainfo_status_if_pos = lua.create_function(
-            |_,
-             (search, o, c, h, ca): (
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            )| {
+        type MangaStatusParams = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+
+        let mangainfo_status_if_pos =
+            lua.create_function(|_, (search, o, c, h, ca): MangaStatusParams| {
                 let s = search.unwrap_or_default().to_lowercase();
                 let o = o.unwrap_or_else(|| "ongoing".into()).to_lowercase();
                 let c = c.unwrap_or_else(|| "completed".into()).to_lowercase();
@@ -204,8 +207,7 @@ impl LuaModuleEngine {
                 } else {
                     Ok("unknown".to_string())
                 }
-            },
-        )?;
+            })?;
         globals.set("MangaInfoStatusIfPos", mangainfo_status_if_pos)?;
 
         // String storage containers
@@ -218,18 +220,22 @@ impl LuaModuleEngine {
 
         let updatelist_tbl = lua.create_table()?;
         updatelist_tbl.set("CurrentDirectoryPageNumber", 0)?;
-        updatelist_tbl.set("UpdateStatusText", lua.create_function(|_, _: String| Ok(()))?)?;
+        updatelist_tbl.set(
+            "UpdateStatusText",
+            lua.create_function(|_, _: String| Ok(()))?,
+        )?;
         globals.set("UPDATELIST", updatelist_tbl)?;
         globals.set("PAGENUMBER", 0)?;
 
         // Global debug table for modules using debug.getinfo
         let debug_table = lua.create_table()?;
-        let getinfo = lua.create_function(|lua, (_level, _what): (Option<i32>, Option<String>)| {
-            let t = lua.create_table()?;
-            t.set("source", "@lua/modules/dummy.lua")?;
-            t.set("short_src", "dummy.lua")?;
-            Ok(t)
-        })?;
+        let getinfo =
+            lua.create_function(|lua, (_level, _what): (Option<i32>, Option<String>)| {
+                let t = lua.create_table()?;
+                t.set("source", "@lua/modules/dummy.lua")?;
+                t.set("short_src", "dummy.lua")?;
+                Ok(t)
+            })?;
         debug_table.set("getinfo", getinfo)?;
         globals.set("debug", debug_table)?;
 
@@ -260,37 +266,51 @@ impl LuaModuleEngine {
             let opt_cb = options_table.clone();
             m_table.set(
                 "AddOptionComboBox",
-                lua.create_function(move |_, (name, _caption, _items, default_idx): (String, String, Option<String>, Option<i32>)| {
-                    let _ = opt_cb.set(name, default_idx.unwrap_or(0));
-                    Ok(())
-                })?,
+                lua.create_function(
+                    move |_,
+                          (name, _caption, _items, default_idx): (
+                        String,
+                        String,
+                        Option<String>,
+                        Option<i32>,
+                    )| {
+                        let _ = opt_cb.set(name, default_idx.unwrap_or(0));
+                        Ok(())
+                    },
+                )?,
             )?;
 
             let opt_check = options_table.clone();
             m_table.set(
                 "AddOptionCheckBox",
-                lua.create_function(move |_, (name, _caption, default_val): (String, String, Option<bool>)| {
-                    let _ = opt_check.set(name, default_val.unwrap_or(false));
-                    Ok(())
-                })?,
+                lua.create_function(
+                    move |_, (name, _caption, default_val): (String, String, Option<bool>)| {
+                        let _ = opt_check.set(name, default_val.unwrap_or(false));
+                        Ok(())
+                    },
+                )?,
             )?;
 
             let opt_spin = options_table.clone();
             m_table.set(
                 "AddOptionSpinEdit",
-                lua.create_function(move |_, (name, _caption, default_val): (String, String, Option<i32>)| {
-                    let _ = opt_spin.set(name, default_val.unwrap_or(0));
-                    Ok(())
-                })?,
+                lua.create_function(
+                    move |_, (name, _caption, default_val): (String, String, Option<i32>)| {
+                        let _ = opt_spin.set(name, default_val.unwrap_or(0));
+                        Ok(())
+                    },
+                )?,
             )?;
 
             let opt_edit = options_table.clone();
             m_table.set(
                 "AddOptionEdit",
-                lua.create_function(move |_, (name, _caption, default_val): (String, String, Option<String>)| {
-                    let _ = opt_edit.set(name, default_val.unwrap_or_default());
-                    Ok(())
-                })?,
+                lua.create_function(
+                    move |_, (name, _caption, default_val): (String, String, Option<String>)| {
+                        let _ = opt_edit.set(name, default_val.unwrap_or_default());
+                        Ok(())
+                    },
+                )?,
             )?;
 
             let opt_get = options_table.clone();
@@ -346,7 +366,8 @@ impl LuaModuleEngine {
                 let name: String = m_table.get("Name").unwrap_or_default();
                 let root_url: String = m_table.get("RootURL").unwrap_or_default();
                 let category: String = m_table.get("Category").unwrap_or_default();
-                let on_get_directory_page_number: Option<String> = m_table.get("OnGetDirectoryPageNumber").ok();
+                let on_get_directory_page_number: Option<String> =
+                    m_table.get("OnGetDirectoryPageNumber").ok();
                 let total_directory: usize = m_table.get("TotalDirectory").unwrap_or(1);
 
                 let module = WebsiteModule {
@@ -426,7 +447,9 @@ impl LuaModuleEngine {
 
         // Read results back from MANGAINFO
         let mangainfo: Table = globals.get("MANGAINFO")?;
-        let title: String = mangainfo.get("Title").unwrap_or_else(|_| "Unknown Title".into());
+        let title: String = mangainfo
+            .get("Title")
+            .unwrap_or_else(|_| "Unknown Title".into());
         let cover_url: Option<String> = mangainfo.get("CoverLink").ok();
         let authors: Option<String> = mangainfo.get("Authors").ok();
         let artists: Option<String> = mangainfo.get("Artists").ok();
@@ -472,8 +495,12 @@ impl LuaModuleEngine {
             EngineError::Custom(format!("Module at {} could not be loaded", file_path))
         })?;
 
-        let on_get_page_number = module.on_get_page_number.unwrap_or_else(|| "GetPageNumber".into());
-        let on_get_image_url = module.on_get_image_url.unwrap_or_else(|| "GetImageURL".into());
+        let on_get_page_number = module
+            .on_get_page_number
+            .unwrap_or_else(|| "GetPageNumber".into());
+        let on_get_image_url = module
+            .on_get_image_url
+            .unwrap_or_else(|| "GetImageURL".into());
 
         let globals = self.lua.globals();
         globals.set("URL", chapter_url)?;
@@ -493,7 +520,10 @@ impl LuaModuleEngine {
         }
 
         // If PageLinks already filled, deduplicate and return them
-        let raw_links = page_links_items.lock().map(|i| i.clone()).unwrap_or_default();
+        let raw_links = page_links_items
+            .lock()
+            .map(|i| i.clone())
+            .unwrap_or_default();
         let mut seen_links = std::collections::HashSet::new();
         let mut final_urls: Vec<String> = Vec::new();
         for u in raw_links {
@@ -506,7 +536,10 @@ impl LuaModuleEngine {
         }
 
         // Otherwise, resolve PageContainerLinks via OnGetImageURL
-        let raw_containers = page_containers_items.lock().map(|i| i.clone()).unwrap_or_default();
+        let raw_containers = page_containers_items
+            .lock()
+            .map(|i| i.clone())
+            .unwrap_or_default();
         let mut seen_c = std::collections::HashSet::new();
         let mut containers: Vec<String> = Vec::new();
         for c in raw_containers {
@@ -535,7 +568,10 @@ impl LuaModuleEngine {
                     let _: mlua::Value = img_fn.call(())?;
                 }
             }
-            let raw_resolved = page_links_items.lock().map(|i| i.clone()).unwrap_or_default();
+            let raw_resolved = page_links_items
+                .lock()
+                .map(|i| i.clone())
+                .unwrap_or_default();
             let mut seen_r = std::collections::HashSet::new();
             final_urls.clear();
             for u in raw_resolved {
@@ -574,10 +610,8 @@ impl LuaModuleEngine {
         if let Ok(http) = globals.get::<Table>("HTTP") {
             if let Ok(headers_tbl) = http.get::<Table>("Headers") {
                 if let Ok(values_tbl) = headers_tbl.get::<Table>("Values") {
-                    for pair in values_tbl.pairs::<String, String>() {
-                        if let Ok((k, v)) = pair {
-                            headers.insert(k, v);
-                        }
+                    for (k, v) in values_tbl.pairs::<String, String>().flatten() {
+                        headers.insert(k, v);
                     }
                 }
             }
@@ -623,9 +657,10 @@ impl LuaModuleEngine {
                     Ok(None)
                 }
                 mlua::Value::String(s) => Ok(Some(s.as_bytes().to_vec())),
-                mlua::Value::Boolean(false) => {
-                    Err(EngineError::Custom(format!("OnDownloadImage failed for {}", image_url)))
-                }
+                mlua::Value::Boolean(false) => Err(EngineError::Custom(format!(
+                    "OnDownloadImage failed for {}",
+                    image_url
+                ))),
                 _ => Ok(None),
             }
         } else {
@@ -645,7 +680,9 @@ impl LuaModuleEngine {
         })?;
 
         let on_get_name_and_link = module.on_get_name_and_link.ok_or_else(|| {
-            EngineError::Custom("Module does not support catalog extraction (OnGetNameAndLink is nil)".into())
+            EngineError::Custom(
+                "Module does not support catalog extraction (OnGetNameAndLink is nil)".into(),
+            )
         })?;
 
         let globals = self.lua.globals();
@@ -670,8 +707,16 @@ impl LuaModuleEngine {
             let _: mlua::Value = fn_get.call(())?;
         }
 
-        let raw_links = self.links_items.lock().map(|i| i.clone()).unwrap_or_default();
-        let raw_names = self.names_items.lock().map(|i| i.clone()).unwrap_or_default();
+        let raw_links = self
+            .links_items
+            .lock()
+            .map(|i| i.clone())
+            .unwrap_or_default();
+        let raw_names = self
+            .names_items
+            .lock()
+            .map(|i| i.clone())
+            .unwrap_or_default();
 
         let mut entries = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -733,7 +778,7 @@ impl LuaModuleEngine {
             let mut known_total_pages = None;
             if let Some(ref dir_fn_name) = module.on_get_directory_page_number {
                 if let Ok(dir_fn) = globals.get::<mlua::Function>(&**dir_fn_name) {
-                    if let Ok(_) = dir_fn.call::<()>(()) {
+                    if dir_fn.call::<()>(()).is_ok() {
                         let p: i64 = globals.get("PAGENUMBER").unwrap_or(0);
                         if p > 0 {
                             known_total_pages = Some(p as usize);
@@ -767,8 +812,16 @@ impl LuaModuleEngine {
                     let _: mlua::Value = fn_get.call(())?;
                 }
 
-                let raw_links = self.links_items.lock().map(|i| i.clone()).unwrap_or_default();
-                let raw_names = self.names_items.lock().map(|i| i.clone()).unwrap_or_default();
+                let raw_links = self
+                    .links_items
+                    .lock()
+                    .map(|i| i.clone())
+                    .unwrap_or_default();
+                let raw_names = self
+                    .names_items
+                    .lock()
+                    .map(|i| i.clone())
+                    .unwrap_or_default();
 
                 let mut entries = Vec::new();
 
@@ -777,7 +830,8 @@ impl LuaModuleEngine {
                     let title = name.trim().to_string();
                     let link = link.trim().to_string();
 
-                    if !title.is_empty() && !link.is_empty() && dir_seen_links.insert(link.clone()) {
+                    if !title.is_empty() && !link.is_empty() && dir_seen_links.insert(link.clone())
+                    {
                         entries.push(CatalogEntry { title, link });
                     }
                 }
@@ -848,13 +902,18 @@ mod tests {
     fn test_lelscan_xpath_diagnostic() {
         let engine = LuaModuleEngine::new().unwrap();
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/LelscanFR.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/LelscanFR.lua");
         let m = engine.load_file(&module_path).unwrap().unwrap();
         println!("Loaded module: {}", m.name);
-        
+
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let res = engine.update_catalog(module_path.to_str().unwrap(), cancel, |entries, prog| {
-            println!("Got {} entries on page {}", entries.len(), prog.current_page);
+            println!(
+                "Got {} entries on page {}",
+                entries.len(),
+                prog.current_page
+            );
             for e in entries.iter().take(3) {
                 println!("  entry: {} -> {}", e.title, e.link);
             }
@@ -868,9 +927,15 @@ mod tests {
     fn test_lua_engine_init_and_js_execution() {
         let engine = LuaModuleEngine::new().unwrap();
         // Test JS unpacker / Duktape emulation via boa_engine
-        let res: String = engine.lua.load(r#"
+        let res: String = engine
+            .lua
+            .load(
+                r#"
             return duktape.ExecJS("1 + 1")
-        "#).eval().unwrap();
+        "#,
+            )
+            .eval()
+            .unwrap();
         assert_eq!(res, "2");
     }
 
@@ -890,7 +955,8 @@ mod tests {
     #[test]
     fn test_novelcool_fr_load() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
 
         let engine = LuaModuleEngine::new().unwrap();
         let module_opt = engine.load_file(module_path).unwrap();
@@ -903,7 +969,8 @@ mod tests {
     #[tokio::test]
     async fn test_novelcool_fr_get_info() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
 
         let engine = LuaModuleEngine::new().unwrap();
         let res = engine.get_manga_info(
@@ -921,7 +988,8 @@ mod tests {
     #[tokio::test]
     async fn test_novelcool_fr_get_chapter_pages() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
 
         let engine = LuaModuleEngine::new().unwrap();
         let res = engine.get_chapter_pages(
@@ -940,7 +1008,8 @@ mod tests {
     #[test]
     fn test_novelcool_fr_fetch_catalog_page() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
 
         let engine = LuaModuleEngine::new().unwrap();
         let (entries, total_pages) = engine
@@ -958,9 +1027,15 @@ mod tests {
     #[test]
     fn test_sushiscan_cover_xpath() {
         let html = r#"<div class="thumb" itemprop="image"><img src="https://sushiscan.net/wp-content/uploads/OnePieceCov.jpg" /></div>"#;
-        let cover = crate::bindings::xquery::eval_xpath_string(html, "//div[@itemprop=\"image\"]//img/@src");
+        let cover = crate::bindings::xquery::eval_xpath_string(
+            html,
+            "//div[@itemprop=\"image\"]//img/@src",
+        );
         println!("Extracted cover: '{}'", cover);
-        assert_eq!(cover, "https://sushiscan.net/wp-content/uploads/OnePieceCov.jpg");
+        assert_eq!(
+            cover,
+            "https://sushiscan.net/wp-content/uploads/OnePieceCov.jpg"
+        );
     }
 
     #[tokio::test]
@@ -968,7 +1043,12 @@ mod tests {
         let client = fmd_net::HttpClient::new().unwrap();
         let mut headers = std::collections::HashMap::new();
         headers.insert("Referer".into(), "https://sushiscan.net/".into());
-        let res = client.get_bytes_with_headers("https://sushiscan.net/wp-content/uploads/RoadToLaughTaleCover.png", &headers).await;
+        let res = client
+            .get_bytes_with_headers(
+                "https://sushiscan.net/wp-content/uploads/RoadToLaughTaleCover.png",
+                &headers,
+            )
+            .await;
         match res {
             Ok(bytes) => println!("Success fetching cover! Received {} bytes", bytes.len()),
             Err(e) => println!("Error fetching cover: {}", e),
@@ -978,7 +1058,8 @@ mod tests {
     #[tokio::test]
     async fn test_mangaplus_get_info() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/MangaPlus.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/MangaPlus.lua");
 
         let engine = LuaModuleEngine::new().unwrap();
         let res = engine.get_manga_info(
@@ -989,7 +1070,10 @@ mod tests {
         let info = res.expect("get_manga_info on MangaPlus failed");
         println!("MangaPlus Title: {}", info.title);
         println!("MangaPlus Chapters count: {}", info.chapters.len());
-        println!("MangaPlus Alternate versions: {:?}", info.alternate_versions);
+        println!(
+            "MangaPlus Alternate versions: {:?}",
+            info.alternate_versions
+        );
         assert!(!info.title.is_empty());
         assert!(!info.chapters.is_empty());
         assert!(!info.alternate_versions.is_empty());
@@ -998,7 +1082,8 @@ mod tests {
     #[tokio::test]
     async fn test_mangaplus_french_info_and_download() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path = std::path::Path::new(&manifest_dir).join("../../lua/modules/MangaPlus.lua");
+        let module_path =
+            std::path::Path::new(&manifest_dir).join("../../lua/modules/MangaPlus.lua");
 
         let engine = LuaModuleEngine::new().unwrap();
         // Test French edition directly
@@ -1013,27 +1098,42 @@ mod tests {
         assert!(!info.chapters.is_empty());
 
         let first_ch = &info.chapters[0];
-        println!("First French chapter: {} ({})", first_ch.title, first_ch.url);
+        println!(
+            "First French chapter: {} ({})",
+            first_ch.title, first_ch.url
+        );
 
-        let pages = engine.get_chapter_pages(module_path.to_str().unwrap(), &first_ch.url)
+        let pages = engine
+            .get_chapter_pages(module_path.to_str().unwrap(), &first_ch.url)
             .expect("get_chapter_pages on French MangaPlus failed");
         println!("Pages count: {}", pages.len());
         assert!(!pages.is_empty());
 
         // Test downloading & decrypting page 1
         let first_page_url = &pages[0];
-        let img_bytes = engine.download_custom_image(module_path.to_str().unwrap(), first_page_url, 0)
+        let img_bytes = engine
+            .download_custom_image(module_path.to_str().unwrap(), first_page_url, 0)
             .expect("download_image on MangaPlus failed")
             .expect("image bytes empty");
 
-        println!("Downloaded & decrypted page size: {} bytes", img_bytes.len());
+        println!(
+            "Downloaded & decrypted page size: {} bytes",
+            img_bytes.len()
+        );
         assert!(img_bytes.len() > 1000);
         // Verify JPEG or PNG or WebP header
         let is_jpeg = img_bytes.starts_with(&[0xFF, 0xD8]);
         let is_png = img_bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]);
-        let is_webp = img_bytes.len() >= 12 && &img_bytes[0..4] == b"RIFF" && &img_bytes[8..12] == b"WEBP";
-        assert!(is_jpeg || is_png || is_webp, "Decrypted image is not a valid image format");
-        println!("Decrypted image format verified! (JPEG: {}, PNG: {}, WebP: {})", is_jpeg, is_png, is_webp);
+        let is_webp =
+            img_bytes.len() >= 12 && &img_bytes[0..4] == b"RIFF" && &img_bytes[8..12] == b"WEBP";
+        assert!(
+            is_jpeg || is_png || is_webp,
+            "Decrypted image is not a valid image format"
+        );
+        println!(
+            "Decrypted image format verified! (JPEG: {}, PNG: {}, WebP: {})",
+            is_jpeg, is_png, is_webp
+        );
     }
 
     #[test]
@@ -1043,26 +1143,45 @@ mod tests {
 
         // Verify os.execute is disabled
         let os_exec: mlua::Value = lua.load("return os and os.execute").eval().unwrap();
-        assert!(os_exec.is_nil(), "os.execute should be nil in hardened sandbox");
+        assert!(
+            os_exec.is_nil(),
+            "os.execute should be nil in hardened sandbox"
+        );
 
         // Verify os.remove is disabled
         let os_rm: mlua::Value = lua.load("return os and os.remove").eval().unwrap();
-        assert!(os_rm.is_nil(), "os.remove should be nil in hardened sandbox");
+        assert!(
+            os_rm.is_nil(),
+            "os.remove should be nil in hardened sandbox"
+        );
 
         // Verify io.popen is disabled
         let io_popen: mlua::Value = lua.load("return io and io.popen").eval().unwrap();
-        assert!(io_popen.is_nil(), "io.popen should be nil in hardened sandbox");
+        assert!(
+            io_popen.is_nil(),
+            "io.popen should be nil in hardened sandbox"
+        );
 
         // Verify package.loadlib is disabled
-        let pkg_loadlib: mlua::Value = lua.load("return package and package.loadlib").eval().unwrap();
-        assert!(pkg_loadlib.is_nil(), "package.loadlib should be nil in hardened sandbox");
+        let pkg_loadlib: mlua::Value = lua
+            .load("return package and package.loadlib")
+            .eval()
+            .unwrap();
+        assert!(
+            pkg_loadlib.is_nil(),
+            "package.loadlib should be nil in hardened sandbox"
+        );
 
         // Verify safe os.time and os.date still function normally
         let time_val: i64 = lua.load("return os.time()").eval().unwrap();
         assert!(time_val > 0, "os.time() should return valid timestamp");
 
         // Verify access to /etc/passwd is blocked by safe io.open
-        let open_res: mlua::Result<mlua::Value> = lua.load("return io.open('/etc/passwd', 'r')").eval();
-        assert!(open_res.is_err(), "Access to /etc/passwd should be denied by sandbox");
+        let open_res: mlua::Result<mlua::Value> =
+            lua.load("return io.open('/etc/passwd', 'r')").eval();
+        assert!(
+            open_res.is_err(),
+            "Access to /etc/passwd should be denied by sandbox"
+        );
     }
 }

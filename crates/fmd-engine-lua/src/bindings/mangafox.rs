@@ -4,7 +4,8 @@ pub fn register_mangafox(lua: &Lua) -> LuaResult<()> {
     let mf_table = lua.create_table()?;
 
     let load_template = lua.create_function(|_, _path: String| Ok(1))?;
-    let remove_watermark = lua.create_function(|_, (_path, _save_png): (String, Option<bool>)| Ok(true))?;
+    let remove_watermark =
+        lua.create_function(|_, (_path, _save_png): (String, Option<bool>)| Ok(true))?;
 
     mf_table.set("LoadTemplate", load_template)?;
     mf_table.set("RemoveWatermark", remove_watermark)?;

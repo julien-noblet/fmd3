@@ -21,15 +21,24 @@ impl Role {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "admin" => Role::Admin,
-            _ => Role::User,
-        }
+        s.parse().unwrap_or(Role::User)
     }
 
     pub fn is_admin(&self) -> bool {
         matches!(self, Role::Admin)
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "admin" => Ok(Role::Admin),
+            _ => Ok(Role::User),
+        }
     }
 }
 

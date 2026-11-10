@@ -8,7 +8,12 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "fmd", author, version, about = "Free Manga Downloader 2 - Linux Headless Daemon & Web Server")]
+#[command(
+    name = "fmd",
+    author,
+    version,
+    about = "Free Manga Downloader 2 - Linux Headless Daemon & Web Server"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -117,7 +122,11 @@ enum Commands {
         #[arg(long, default_value = "downloads")]
         downloads_dir: PathBuf,
         /// Internal worker authentication token
-        #[arg(long, env = "FMD_INTERNAL_TOKEN", default_value = "fmd_internal_worker_secret_key_san")]
+        #[arg(
+            long,
+            env = "FMD_INTERNAL_TOKEN",
+            default_value = "fmd_internal_worker_secret_key_san"
+        )]
         internal_token: String,
     },
     /// Manage authentication, users, and API tokens
@@ -253,20 +262,39 @@ async fn main() -> anyhow::Result<()> {
 
                                     if let Some(first_ch) = info.chapters.first() {
                                         println!("\nTesting Chapter Pages extraction on chapter: '{}' ({})", first_ch.title, first_ch.url);
-                                        match engine.get_chapter_pages(&m.file_path, &first_ch.url) {
+                                        match engine.get_chapter_pages(&m.file_path, &first_ch.url)
+                                        {
                                             Ok(pages) => {
                                                 println!("✓ Pages:    {} detected", pages.len());
                                                 if let Some(first_page) = pages.first() {
                                                     println!("✓ Page 1:   {}", first_page);
 
-                                                    let headers = engine.prepare_download_image(&m.file_path, first_page, 0).unwrap_or_default();
+                                                    let headers = engine
+                                                        .prepare_download_image(
+                                                            &m.file_path,
+                                                            first_page,
+                                                            0,
+                                                        )
+                                                        .unwrap_or_default();
                                                     println!("✓ Headers:  {:?}", headers);
 
                                                     let http = engine.http_client();
-                                                    let custom_bytes = engine.download_custom_image(&m.file_path, first_page, 0).ok().flatten();
+                                                    let custom_bytes = engine
+                                                        .download_custom_image(
+                                                            &m.file_path,
+                                                            first_page,
+                                                            0,
+                                                        )
+                                                        .ok()
+                                                        .flatten();
                                                     let fetch_res = match custom_bytes {
                                                         Some(b) => Ok(b),
-                                                        None => http.get_bytes_with_headers(first_page, &headers).await,
+                                                        None => {
+                                                            http.get_bytes_with_headers(
+                                                                first_page, &headers,
+                                                            )
+                                                            .await
+                                                        }
                                                     };
 
                                                     match fetch_res {
@@ -293,7 +321,10 @@ async fn main() -> anyhow::Result<()> {
                         };
                         if wasm_path.exists() {
                             let wasm_engine = Arc::new(fmd_engine_wasm::WasmEngine::new()?);
-                            let wasm_mod = fmd_engine_wasm::WasmMangaModule::load_from_file(wasm_engine, &wasm_path)?;
+                            let wasm_mod = fmd_engine_wasm::WasmMangaModule::load_from_file(
+                                wasm_engine,
+                                &wasm_path,
+                            )?;
                             println!("\n=== WASM Module Diagnostic ===");
                             println!("Name:       {}", wasm_mod.name());
                             println!("ID:         {}", wasm_mod.id());
@@ -324,7 +355,10 @@ async fn main() -> anyhow::Result<()> {
                 let modules = engine.scan_modules_dir(&dir)?;
                 println!("Found {} active modules:", modules.len());
                 for m in modules.iter().take(20) {
-                    println!(" - [{}] {} ({}) -> {}", m.category, m.name, m.root_url, m.id);
+                    println!(
+                        " - [{}] {} ({}) -> {}",
+                        m.category, m.name, m.root_url, m.id
+                    );
                 }
                 if modules.len() > 20 {
                     println!(" ... and {} more modules.", modules.len() - 20);
@@ -338,20 +372,35 @@ async fn main() -> anyhow::Result<()> {
             let count = db.import_legacy_db(path).await?;
             println!("Successfully imported {} favorites/series!", count);
         }
-        Commands::Catalog { search, module, sync, db, dir, limit } => {
+        Commands::Catalog {
+            search,
+            module,
+            sync,
+            db,
+            dir,
+            limit,
+        } => {
             let database = Database::new(db).await?;
 
             if let Some(mod_target) = sync {
                 let engine = LuaModuleEngine::new()?;
                 println!("Searching for module '{}' in {:?}...", mod_target, dir);
                 let modules = engine.scan_modules_dir(&dir)?;
-                let m = modules.into_iter().find(|m| {
-                    m.name.eq_ignore_ascii_case(&mod_target)
-                        || m.id.eq_ignore_ascii_case(&mod_target)
-                }).ok_or_else(|| anyhow::anyhow!("Module '{}' not found", mod_target))?;
+                let m = modules
+                    .into_iter()
+                    .find(|m| {
+                        m.name.eq_ignore_ascii_case(&mod_target)
+                            || m.id.eq_ignore_ascii_case(&mod_target)
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("Module '{}' not found", mod_target))?;
 
-                println!("Starting catalog sync for [{}] {} (Root: {})...", m.category, m.name, m.root_url);
-                database.set_module_sync_status(&m.id, "Syncing", None, None).await?;
+                println!(
+                    "Starting catalog sync for [{}] {} (Root: {})...",
+                    m.category, m.name, m.root_url
+                );
+                database
+                    .set_module_sync_status(&m.id, "Syncing", None, None)
+                    .await?;
 
                 let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let db_clone = database.clone();
@@ -361,42 +410,82 @@ async fn main() -> anyhow::Result<()> {
                 let total = tokio::task::spawn_blocking(move || {
                     let handle = tokio::runtime::Handle::current();
                     engine.update_catalog(&file_path, cancel_token, |entries, progress| {
-                        let items: Vec<(String, String)> = entries.into_iter().map(|e| (e.title, e.link)).collect();
+                        let items: Vec<(String, String)> =
+                            entries.into_iter().map(|e| (e.title, e.link)).collect();
                         let count = items.len();
-                        
+
                         handle.block_on(async {
                             let _ = db_clone.upsert_catalog_items(&m_id, &items).await;
                         });
 
-                        let p_str = progress.total_pages.map(|tp| format!("{}/{}", progress.current_page + 1, tp)).unwrap_or_else(|| format!("{}", progress.current_page + 1));
-                        println!("  Page {} (Dir {}/{}): +{} mangas (Total: {})", p_str, progress.directory_index + 1, progress.total_directories, count, progress.items_found);
+                        let p_str = progress
+                            .total_pages
+                            .map(|tp| format!("{}/{}", progress.current_page + 1, tp))
+                            .unwrap_or_else(|| format!("{}", progress.current_page + 1));
+                        println!(
+                            "  Page {} (Dir {}/{}): +{} mangas (Total: {})",
+                            p_str,
+                            progress.directory_index + 1,
+                            progress.total_directories,
+                            count,
+                            progress.items_found
+                        );
                         Ok(())
                     })
-                }).await??;
+                })
+                .await??;
 
-                database.set_module_sync_status(&m.id, "Completed", None, Some(total as i64)).await?;
-                println!("✓ Successfully synchronized {} mangas from module '{}'!", total, m.name);
+                database
+                    .set_module_sync_status(&m.id, "Completed", None, Some(total as i64))
+                    .await?;
+                println!(
+                    "✓ Successfully synchronized {} mangas from module '{}'!",
+                    total, m.name
+                );
             } else {
                 let query = search.unwrap_or_default();
                 let mod_id = if let Some(ref m_name) = module {
                     let engine = LuaModuleEngine::new().ok();
-                    let modules = engine.and_then(|e| e.scan_modules_dir(&dir).ok()).unwrap_or_default();
-                    modules.iter().find(|m| m.name.eq_ignore_ascii_case(m_name) || m.id.eq_ignore_ascii_case(m_name)).map(|m| m.id.clone()).or_else(|| Some(m_name.clone()))
+                    let modules = engine
+                        .and_then(|e| e.scan_modules_dir(&dir).ok())
+                        .unwrap_or_default();
+                    modules
+                        .iter()
+                        .find(|m| {
+                            m.name.eq_ignore_ascii_case(m_name) || m.id.eq_ignore_ascii_case(m_name)
+                        })
+                        .map(|m| m.id.clone())
+                        .or_else(|| Some(m_name.clone()))
                 } else {
                     None
                 };
-                let (items, total) = database.search_catalog(&query, mod_id.as_deref(), limit, 0).await?;
+                let (items, total) = database
+                    .search_catalog(&query, mod_id.as_deref(), limit, 0)
+                    .await?;
                 println!("=== Catalog Search Results ({} total match(es)) ===", total);
                 if items.is_empty() {
                     println!("No mangas found. Use `fmd catalog --sync <MODULE>` to populate local catalog.");
                 } else {
                     for (idx, item) in items.iter().enumerate() {
-                        println!(" {:2}. [{}] {} -> {}", idx + 1, item.module_id, item.title, item.link);
+                        println!(
+                            " {:2}. [{}] {} -> {}",
+                            idx + 1,
+                            item.module_id,
+                            item.title,
+                            item.link
+                        );
                     }
                 }
             }
         }
-        Commands::Favorites { list: _, check, id, auto_download, db, dir } => {
+        Commands::Favorites {
+            list: _,
+            check,
+            id,
+            auto_download,
+            db,
+            dir,
+        } => {
             let database = Database::new(db).await?;
             let favorites = database.list_favorites_with_stats().await?;
 
@@ -416,13 +505,16 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .collect();
 
-                println!("Checking {} favorite(s) for new chapters...", target_favs.len());
+                println!(
+                    "Checking {} favorite(s) for new chapters...",
+                    target_favs.len()
+                );
                 let mut total_new = 0;
 
                 for fav in target_favs {
-                    let module = modules
-                        .iter()
-                        .find(|m| m.id == fav.module_id || m.name.eq_ignore_ascii_case(&fav.module_id));
+                    let module = modules.iter().find(|m| {
+                        m.id == fav.module_id || m.name.eq_ignore_ascii_case(&fav.module_id)
+                    });
                     let m = match module {
                         Some(m) => m,
                         None => {
@@ -446,7 +538,10 @@ async fn main() -> anyhow::Result<()> {
                                 })
                                 .collect();
 
-                            match database.check_favorite_new_chapters(&fav.manga_id, &chaps).await {
+                            match database
+                                .check_favorite_new_chapters(&fav.manga_id, &chaps)
+                                .await
+                            {
                                 Ok(new_chaps) => {
                                     if new_chaps.is_empty() {
                                         println!("Up to date ({} chapters)", chaps.len());
@@ -459,7 +554,10 @@ async fn main() -> anyhow::Result<()> {
 
                                         let should_dl = auto_download || fav.auto_download;
                                         if should_dl {
-                                            println!("    -> Queuing for download ({})", fav.download_format);
+                                            println!(
+                                                "    -> Queuing for download ({})",
+                                                fav.download_format
+                                            );
                                             for ch in new_chaps {
                                                 let dl_id = uuid::Uuid::new_v4().to_string();
                                                 let _ = sqlx::query(
@@ -505,7 +603,8 @@ async fn main() -> anyhow::Result<()> {
                         "", "", "", "", "", ""
                     );
                     for (idx, f) in favorites.iter().enumerate() {
-                        let dl_stat = format!("{}/{}", f.downloaded_chapters_count, f.total_chapters);
+                        let dl_stat =
+                            format!("{}/{}", f.downloaded_chapters_count, f.total_chapters);
                         let auto_dl = if f.auto_download { "ON" } else { "OFF" };
                         let title = if f.title.len() > 28 {
                             format!("{}...", &f.title[..25])
@@ -525,7 +624,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Config { get, set, list: _, db } => {
+        Commands::Config {
+            get,
+            set,
+            list: _,
+            db,
+        } => {
             let database = Database::new(db).await?;
             if let Some(key) = get {
                 let val = database.get_setting(&key).await?;
@@ -543,13 +647,31 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:<24} : {}", "download_dir", s.download_dir);
                 println!("{:<24} : {}", "default_format", s.default_format);
                 println!("{:<24} : {}", "naming_template", s.naming_template);
-                println!("{:<24} : {}", "flaresolverr_url", if s.flaresolverr_url.is_empty() { "<disabled>" } else { &s.flaresolverr_url });
-                println!("{:<24} : {} hour(s)", "check_interval_hours", s.check_interval_hours);
-                println!("{:<24} : {} day(s)", "catalog_resync_days", s.catalog_resync_days);
+                println!(
+                    "{:<24} : {}",
+                    "flaresolverr_url",
+                    if s.flaresolverr_url.is_empty() {
+                        "<disabled>"
+                    } else {
+                        &s.flaresolverr_url
+                    }
+                );
+                println!(
+                    "{:<24} : {} hour(s)",
+                    "check_interval_hours", s.check_interval_hours
+                );
+                println!(
+                    "{:<24} : {} day(s)",
+                    "catalog_resync_days", s.catalog_resync_days
+                );
             }
         }
         Commands::Auth { action } => match action {
-            AuthCommands::Login { server, username, password } => {
+            AuthCommands::Login {
+                server,
+                username,
+                password,
+            } => {
                 let pwd = match password {
                     Some(p) => p,
                     None => {
@@ -586,7 +708,8 @@ async fn main() -> anyhow::Result<()> {
             }
             AuthCommands::Status { server, token } => {
                 let client = reqwest::Client::new();
-                let mut req = client.get(format!("{}/api/auth/status", server.trim_end_matches('/')));
+                let mut req =
+                    client.get(format!("{}/api/auth/status", server.trim_end_matches('/')));
                 if let Some(ref t) = token {
                     req = req.header("Authorization", format!("Bearer {}", t));
                 }
@@ -610,13 +733,23 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("Error querying status: {}", res.status());
                 }
             }
-            AuthCommands::CreateToken { username, name, expires_days, db } => {
+            AuthCommands::CreateToken {
+                username,
+                name,
+                expires_days,
+                db,
+            } => {
                 let database = Database::new(db).await?;
                 let user_opt = database.get_user_by_username(&username).await?;
                 match user_opt {
                     Some(user) => {
-                        let (raw_token, token_meta) = database.create_api_token(&user.id, &name, expires_days).await?;
-                        println!("✓ API Token generated successfully for user '{}'!", username);
+                        let (raw_token, token_meta) = database
+                            .create_api_token(&user.id, &name, expires_days)
+                            .await?;
+                        println!(
+                            "✓ API Token generated successfully for user '{}'!",
+                            username
+                        );
                         println!("Token ID : {}", token_meta.id);
                         println!("Name     : {}", token_meta.name);
                         println!("Token    : {}", raw_token);
@@ -636,21 +769,40 @@ async fn main() -> anyhow::Result<()> {
                     let active_str = if u.is_active { "Active" } else { "Inactive" };
                     println!(
                         "- {} [{}] ({}) | dl: {}, fav: {}, sync: {}, refresh: {}",
-                        u.username, u.role.as_str(), active_str,
-                        p.can_download, p.can_manage_favorites, p.can_trigger_catalog_sync, p.can_force_refresh
+                        u.username,
+                        u.role.as_str(),
+                        active_str,
+                        p.can_download,
+                        p.can_manage_favorites,
+                        p.can_trigger_catalog_sync,
+                        p.can_force_refresh
                     );
                 }
             }
-            AuthCommands::CreateUser { username, password, role, db } => {
+            AuthCommands::CreateUser {
+                username,
+                password,
+                role,
+                db,
+            } => {
                 let database = Database::new(db).await?;
                 let r = fmd_core::Role::from_str(&role);
                 let user_count = database.count_users().await?;
                 if user_count == 0 && r == fmd_core::Role::Admin {
                     let user = database.create_initial_admin(&username, &password).await?;
-                    println!("✓ Initial administrator '{}' created successfully!", user.username);
+                    println!(
+                        "✓ Initial administrator '{}' created successfully!",
+                        user.username
+                    );
                 } else {
-                    let user = database.create_user(&username, Some(&password), r, None, None, None).await?;
-                    println!("✓ User '{}' [{}] created successfully!", user.username, user.role.as_str());
+                    let user = database
+                        .create_user(&username, Some(&password), r, None, None, None)
+                        .await?;
+                    println!(
+                        "✓ User '{}' [{}] created successfully!",
+                        user.username,
+                        user.role.as_str()
+                    );
                 }
             }
         },
@@ -754,6 +906,7 @@ async fn run_worker(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_worker_task(
     task: fmd_core::TaskMessage,
     http_client: &reqwest::Client,
@@ -777,7 +930,11 @@ async fn process_worker_task(
         } => {
             tracing::info!(
                 "Worker processing [{}] '{}' - '{}' [module: {}, format: {}]",
-                download_id, manga_title, chapter_title, module_id, format
+                download_id,
+                manga_title,
+                chapter_title,
+                module_id,
+                format
             );
 
             let _ = http_client
@@ -848,7 +1005,10 @@ async fn process_worker_task(
 
                     if wasm_file.exists() {
                         let wasm_engine = Arc::new(fmd_engine_wasm::WasmEngine::new()?);
-                        let wasm_mod = fmd_engine_wasm::WasmMangaModule::load_from_file(wasm_engine, &wasm_file)?;
+                        let wasm_mod = fmd_engine_wasm::WasmMangaModule::load_from_file(
+                            wasm_engine,
+                            &wasm_file,
+                        )?;
                         let p = match wasm_mod.get_chapter_pages(&chapter_url) {
                             Ok(pages_vec) if !pages_vec.is_empty() => pages_vec,
                             Ok(_) => {
@@ -884,7 +1044,10 @@ async fn process_worker_task(
                         };
                         (p, Some(wasm_mod))
                     } else {
-                        let err = format!("Module '{}' introuvable dans le dossier des modules (ni Lua ni WASM)", module_id);
+                        let err = format!(
+                            "Module '{}' introuvable dans le dossier des modules (ni Lua ni WASM)",
+                            module_id
+                        );
                         tracing::error!("{}", err);
                         let _ = http_client
                             .post(format!("{}/api/internal/tasks/complete", server_url))
@@ -916,7 +1079,8 @@ async fn process_worker_task(
                 .send()
                 .await;
 
-            let mut packer = fmd_core::ChapterPacker::new(manga_title.clone(), chapter_title.clone());
+            let mut packer =
+                fmd_core::ChapterPacker::new(manga_title.clone(), chapter_title.clone());
             let net_client = fmd_net::HttpClient::new()?;
             let mut download_err = None;
 
@@ -928,8 +1092,13 @@ async fn process_worker_task(
                 for attempt in 1..=MAX_PAGE_RETRIES {
                     let (headers, custom_bytes) = if let Some(ref m) = module {
                         let eng = engine.lock().await;
-                        let h = eng.prepare_download_image(&m.file_path, page_url, idx).unwrap_or_default();
-                        let b = eng.download_custom_image(&m.file_path, page_url, idx).ok().flatten();
+                        let h = eng
+                            .prepare_download_image(&m.file_path, page_url, idx)
+                            .unwrap_or_default();
+                        let b = eng
+                            .download_custom_image(&m.file_path, page_url, idx)
+                            .ok()
+                            .flatten();
                         (h, b)
                     } else {
                         (std::collections::HashMap::new(), None)
@@ -952,7 +1121,9 @@ async fn process_worker_task(
                             let page_name = format!("{:03}.{}", idx + 1, ext);
 
                             let final_bytes = if let Some(ref wasm_mod) = maybe_wasm_module {
-                                wasm_mod.process_image(&bytes, &page_name, ext).unwrap_or(bytes)
+                                wasm_mod
+                                    .process_image(&bytes, &page_name, ext)
+                                    .unwrap_or(bytes)
                             } else {
                                 bytes
                             };
@@ -984,7 +1155,10 @@ async fn process_worker_task(
                     }
 
                     if attempt < MAX_PAGE_RETRIES {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(1000 * attempt as u64)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            1000 * attempt as u64,
+                        ))
+                        .await;
                     }
                 }
 
@@ -1054,7 +1228,11 @@ async fn process_worker_task(
 
                 match packer.pack_to(fmt, &out_path) {
                     Ok(_) => {
-                        tracing::info!("Worker successfully archived [{}] to {}", download_id, out_path.display());
+                        tracing::info!(
+                            "Worker successfully archived [{}] to {}",
+                            download_id,
+                            out_path.display()
+                        );
                         let _ = http_client
                             .post(format!("{}/api/internal/tasks/complete", server_url))
                             .header("X-FMD-Internal-Token", internal_token)
@@ -1086,7 +1264,10 @@ async fn process_worker_task(
             }
         }
         fmd_core::TaskKind::SyncCatalog { module_id } => {
-            tracing::info!("Worker: Sync catalog task for module '{}' acknowledged", module_id);
+            tracing::info!(
+                "Worker: Sync catalog task for module '{}' acknowledged",
+                module_id
+            );
         }
     }
 

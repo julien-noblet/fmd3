@@ -36,7 +36,9 @@ impl ChapterPacker {
     pub fn generate_comic_info_xml(&self, page_count: usize) -> String {
         let meta = self.metadata.as_ref();
         let series = meta.map(|m| m.series.as_str()).unwrap_or(&self.manga_title);
-        let title = meta.map(|m| m.title.as_str()).unwrap_or(&self.chapter_title);
+        let title = meta
+            .map(|m| m.title.as_str())
+            .unwrap_or(&self.chapter_title);
         let number = meta
             .and_then(|m| m.number.clone())
             .unwrap_or_else(|| extract_chapter_number(&self.chapter_title).unwrap_or_default());
@@ -100,7 +102,8 @@ impl ChapterPacker {
         }
         let file = File::create(output_path)?;
         let mut zip = ZipWriter::new(BufWriter::new(file));
-        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         for (name, data) in &self.pages {
             zip.start_file(name, options)?;
@@ -134,7 +137,7 @@ impl ChapterPacker {
         let catalog_ref = alloc_ref();
         let pages_ref = alloc_ref();
 
-        for (_idx, (_name, data)) in self.pages.iter().enumerate() {
+        for (_name, data) in self.pages.iter() {
             if let Ok(img) = image::load_from_memory(data) {
                 let width = img.width() as f32;
                 let height = img.height() as f32;
@@ -197,11 +200,13 @@ impl ChapterPacker {
         let mut zip = ZipWriter::new(BufWriter::new(file));
 
         // 1. mimetype (MUST be first file, uncompressed / Stored)
-        let stored_opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let stored_opt =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("mimetype", stored_opt)?;
         zip.write_all(b"application/epub+zip")?;
 
-        let deflated_opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let deflated_opt =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         // 2. META-INF/container.xml
         zip.start_file("META-INF/container.xml", deflated_opt)?;
@@ -307,7 +312,9 @@ impl ChapterPacker {
 }
 
 pub fn extract_chapter_number(title: &str) -> Option<String> {
-    let re = Regex::new(r"(?i)(?:chapitre|chapter|ch\.?|ep\.?|volume|vol\.?|tome)?\s*(\d+(?:\.\d+)?)").ok()?;
+    let re =
+        Regex::new(r"(?i)(?:chapitre|chapter|ch\.?|ep\.?|volume|vol\.?|tome)?\s*(\d+(?:\.\d+)?)")
+            .ok()?;
     if let Some(caps) = re.captures(title) {
         if let Some(m) = caps.get(1) {
             return Some(m.as_str().to_string());
@@ -402,7 +409,10 @@ mod tests {
     #[test]
     fn test_extract_chapter_number() {
         assert_eq!(extract_chapter_number("Chapitre 1180"), Some("1180".into()));
-        assert_eq!(extract_chapter_number("Ch. 86 Chapitre 86"), Some("86".into()));
+        assert_eq!(
+            extract_chapter_number("Ch. 86 Chapitre 86"),
+            Some("86".into())
+        );
         assert_eq!(extract_chapter_number("1 VF"), Some("1".into()));
         assert_eq!(extract_chapter_number("Volume 4"), Some("4".into()));
         assert_eq!(extract_chapter_number("95.5"), Some("95.5".into()));
@@ -411,13 +421,40 @@ mod tests {
     #[test]
     fn test_format_download_path() {
         let base = Path::new("downloads");
-        let path1 = format_download_path(base, "{manga}/{chapter}", "One Piece", "Chapitre 1180", "1180", "SushiScan", "cbz");
+        let path1 = format_download_path(
+            base,
+            "{manga}/{chapter}",
+            "One Piece",
+            "Chapitre 1180",
+            "1180",
+            "SushiScan",
+            "cbz",
+        );
         assert_eq!(path1, Path::new("downloads/One Piece/Chapitre 1180.cbz"));
 
-        let path2 = format_download_path(base, "{manga}/{manga} - Ch.{number}", "One Piece", "Chapitre 1180", "1180", "SushiScan", "cbz");
-        assert_eq!(path2, Path::new("downloads/One Piece/One Piece - Ch.1180.cbz"));
+        let path2 = format_download_path(
+            base,
+            "{manga}/{manga} - Ch.{number}",
+            "One Piece",
+            "Chapitre 1180",
+            "1180",
+            "SushiScan",
+            "cbz",
+        );
+        assert_eq!(
+            path2,
+            Path::new("downloads/One Piece/One Piece - Ch.1180.cbz")
+        );
 
-        let path3 = format_download_path(base, "{manga}/{chapter}", "One Piece", "Chapitre 1180", "1180", "SushiScan", "");
+        let path3 = format_download_path(
+            base,
+            "{manga}/{chapter}",
+            "One Piece",
+            "Chapitre 1180",
+            "1180",
+            "SushiScan",
+            "",
+        );
         assert_eq!(path3, Path::new("downloads/One Piece/Chapitre 1180"));
     }
 

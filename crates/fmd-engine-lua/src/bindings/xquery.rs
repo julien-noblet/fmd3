@@ -64,7 +64,7 @@ pub fn create_xpath_node_table(lua: &Lua, node: XPathNode) -> LuaResult<Table> {
         lua.create_function(move |lua, args: MultiValue| {
             if let Some(ref jv) = n.json_value {
                 if let Some(arr) = jv.as_array() {
-                    let idx = match args.get(0) {
+                    let idx = match args.front() {
                         Some(Value::Integer(i)) => *i as usize,
                         _ => match args.get(1) {
                             Some(Value::Integer(i)) => *i as usize,
@@ -142,7 +142,7 @@ pub fn create_xpath_nodelist_table(lua: &Lua, nodes: Vec<XPathNode>) -> LuaResul
         "Get",
         lua.create_function(move |lua, args: MultiValue| {
             // Check if Get(index) was called
-            if let Some(Value::Integer(idx)) = args.get(0).or_else(|| args.get(1)) {
+            if let Some(Value::Integer(idx)) = args.front().or_else(|| args.get(1)) {
                 let uidx = *idx as usize;
                 let zero_idx = if uidx > 0 && uidx <= n.len() {
                     uidx - 1
@@ -241,7 +241,10 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
         "XPath",
         lua.create_function(move |lua, args: MultiValue| {
             let query = extract_string_arg(&args, 0).unwrap_or_default();
-            let fallback = state_xpath.lock().map(|st| st.html.clone()).unwrap_or_default();
+            let fallback = state_xpath
+                .lock()
+                .map(|st| st.html.clone())
+                .unwrap_or_default();
             let html = extract_context_html(&args, &fallback);
             let nodes = eval_xpath_nodes(&html, &query);
             create_xpath_nodelist_table(lua, nodes)
@@ -254,7 +257,10 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
         "XPathString",
         lua.create_function(move |_lua, args: MultiValue| {
             let query = extract_string_arg(&args, 0).unwrap_or_default();
-            let fallback = state_xpath_str.lock().map(|st| st.html.clone()).unwrap_or_default();
+            let fallback = state_xpath_str
+                .lock()
+                .map(|st| st.html.clone())
+                .unwrap_or_default();
             let html = extract_context_html(&args, &fallback);
             Ok(eval_xpath_string(&html, &query))
         })?,
@@ -266,7 +272,10 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
         "XPathCount",
         lua.create_function(move |_lua, args: MultiValue| {
             let query = extract_string_arg(&args, 0).unwrap_or_default();
-            let fallback = state_count.lock().map(|st| st.html.clone()).unwrap_or_default();
+            let fallback = state_count
+                .lock()
+                .map(|st| st.html.clone())
+                .unwrap_or_default();
             let html = extract_context_html(&args, &fallback);
             let count = eval_xpath_count(&html, &query);
             Ok(count as i64)
@@ -292,7 +301,10 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
                 }
             }
 
-            let fallback = state_str_all.lock().map(|st| st.html.clone()).unwrap_or_default();
+            let fallback = state_str_all
+                .lock()
+                .map(|st| st.html.clone())
+                .unwrap_or_default();
             let html = extract_context_html(&args, &fallback);
             let results = eval_xpath_string_all(&html, &query);
 
@@ -302,7 +314,7 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
                 }
                 Ok(Value::Nil)
             } else {
-                Ok(Value::String(lua.create_string(&results.join(", "))?))
+                Ok(Value::String(lua.create_string(results.join(", "))?))
             }
         })?,
     )?;
@@ -313,7 +325,10 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
         "XPathHREFAll",
         lua.create_function(move |_lua, args: MultiValue| {
             let (query, links_val, names_val) = extract_href_args(&args);
-            let html = state_href_all.lock().map(|st| st.html.clone()).unwrap_or_default();
+            let html = state_href_all
+                .lock()
+                .map(|st| st.html.clone())
+                .unwrap_or_default();
             let pairs = eval_xpath_href_all(&html, &query);
 
             for (idx, (href, text)) in pairs.iter().enumerate() {
@@ -334,7 +349,10 @@ pub fn create_txquery_table(lua: &Lua, html_content: String) -> LuaResult<Table>
         "XPathHREFTitleAll",
         lua.create_function(move |_lua, args: MultiValue| {
             let (query, links_val, names_val) = extract_href_args(&args);
-            let html = state_title_all.lock().map(|st| st.html.clone()).unwrap_or_default();
+            let html = state_title_all
+                .lock()
+                .map(|st| st.html.clone())
+                .unwrap_or_default();
             let pairs = eval_xpath_href_title_all(&html, &query);
 
             for (idx, (href, title)) in pairs.iter().enumerate() {
@@ -445,7 +463,10 @@ pub fn eval_xpath_string(html: &str, query: &str) -> String {
 
     // 2. Fallback to CSS Scraper
     let re_attr = Regex::new(r"/@([a-zA-Z0-9_-]+)\s*$").unwrap();
-    let attr_name = re_attr.captures(query).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+    let attr_name = re_attr
+        .captures(query)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
 
     let css_selector = convert_xpath_to_css(query);
     if let Ok(sel) = Selector::parse(&css_selector) {
@@ -493,7 +514,10 @@ pub fn eval_xpath_string_all(html: &str, query: &str) -> Vec<String> {
 
     // 2. Fallback to CSS Scraper
     let re_attr = Regex::new(r"/@([a-zA-Z0-9_-]+)\s*$").unwrap();
-    let attr_name = re_attr.captures(query).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+    let attr_name = re_attr
+        .captures(query)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
     let css_selector = convert_xpath_to_css(query);
     let mut results = Vec::new();
 
@@ -524,7 +548,10 @@ pub fn eval_xpath_href_all(html: &str, query: &str) -> Vec<(String, String)> {
                 for item in items.iter() {
                     if let Ok(node) = item.as_node() {
                         if let Ok(elem) = node.as_element_node() {
-                            let href = elem.get_attribute(&tree, "href").unwrap_or_default().to_string();
+                            let href = elem
+                                .get_attribute(&tree, "href")
+                                .unwrap_or_default()
+                                .to_string();
                             let text = elem.text_content(&tree).trim().to_string();
                             pairs.push((href, text));
                         }
@@ -560,7 +587,10 @@ pub fn eval_xpath_href_title_all(html: &str, query: &str) -> Vec<(String, String
                 for item in items.iter() {
                     if let Ok(node) = item.as_node() {
                         if let Ok(elem) = node.as_element_node() {
-                            let href = elem.get_attribute(&tree, "href").unwrap_or_default().to_string();
+                            let href = elem
+                                .get_attribute(&tree, "href")
+                                .unwrap_or_default()
+                                .to_string();
                             let title = elem
                                 .get_attribute(&tree, "title")
                                 .map(|s| s.to_string())
@@ -794,7 +824,7 @@ fn eval_json_string_all(html: &str, query: &str) -> Vec<String> {
 // ==============================================================================
 
 fn extract_string_arg(args: &MultiValue, default_idx: usize) -> Option<String> {
-    match args.get(0) {
+    match args.front() {
         Some(Value::Table(_)) | Some(Value::UserData(_)) => {
             if let Some(Value::String(s)) = args.get(default_idx + 1) {
                 return s.to_str().ok().map(|st| st.to_string());
@@ -810,7 +840,7 @@ fn extract_string_arg(args: &MultiValue, default_idx: usize) -> Option<String> {
 }
 
 fn extract_href_args(args: &MultiValue) -> (String, Option<Value>, Option<Value>) {
-    let (q_idx, l_idx, n_idx) = match args.get(0) {
+    let (q_idx, l_idx, n_idx) = match args.front() {
         Some(Value::Table(_)) | Some(Value::UserData(_)) => (1, 2, 3),
         _ => (0, 1, 2),
     };
@@ -869,7 +899,7 @@ fn convert_xpath_to_css(xpath: &str) -> String {
     let re_contains = Regex::new(r#"\[contains\(@class,\s*"([^"]+)"\)\]"#).unwrap();
     s = re_contains.replace_all(&s, ".$1").to_string();
     s = s.replace('/', " ");
-    s = s.replace('(', "").replace(')', "");
+    s = s.replace(['(', ')'], "");
     s.trim().to_string()
 }
 

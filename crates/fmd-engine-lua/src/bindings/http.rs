@@ -47,10 +47,8 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
         // Extract custom headers from HTTP.Headers.Values
         let mut custom_headers = HashMap::new();
         if let Ok(values_tbl) = headers_ref.get::<Table>("Values") {
-            for pair in values_tbl.pairs::<String, String>() {
-                if let Ok((k, v)) = pair {
-                    custom_headers.insert(k, v);
-                }
+            for (k, v) in values_tbl.pairs::<String, String>().flatten() {
+                custom_headers.insert(k, v);
             }
         }
 
@@ -64,7 +62,9 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
                 .build()
                 .map_err(|e| fmd_net::NetError::Other(e.to_string()))?;
             rt.block_on(async move {
-                client.get_bytes_and_status_with_headers(&url, &custom_headers).await
+                client
+                    .get_bytes_and_status_with_headers(&url, &custom_headers)
+                    .await
             })
         });
 
@@ -97,10 +97,8 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
     let post_fn = lua.create_function(move |_, (url, body): (String, String)| {
         let mut custom_headers = HashMap::new();
         if let Ok(values_tbl) = headers_post_ref.get::<Table>("Values") {
-            for pair in values_tbl.pairs::<String, String>() {
-                if let Ok((k, v)) = pair {
-                    custom_headers.insert(k, v);
-                }
+            for (k, v) in values_tbl.pairs::<String, String>().flatten() {
+                custom_headers.insert(k, v);
             }
         }
 

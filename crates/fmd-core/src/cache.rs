@@ -1,19 +1,14 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TtlUnit {
     Minutes,
+    #[default]
     Hours,
     Days,
     Weeks,
-}
-
-impl Default for TtlUnit {
-    fn default() -> Self {
-        TtlUnit::Hours
-    }
 }
 
 impl TtlUnit {
@@ -92,7 +87,11 @@ impl MangaCacheItem {
 
     pub fn remaining_seconds(&self) -> i64 {
         let diff = (self.expires_at - Utc::now()).num_seconds();
-        if diff < 0 { 0 } else { diff }
+        if diff < 0 {
+            0
+        } else {
+            diff
+        }
     }
 }
 

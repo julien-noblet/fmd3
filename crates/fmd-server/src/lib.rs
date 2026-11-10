@@ -59,6 +59,7 @@ pub struct ActiveSyncInfo {
     pub started_at_secs: u64,
 }
 
+#[derive(Default)]
 pub struct CatalogSyncManager {
     active_cancel: Mutex<Option<(String, Arc<std::sync::atomic::AtomicBool>)>>,
     active_info: Mutex<Option<ActiveSyncInfo>>,
@@ -118,7 +119,9 @@ impl CatalogSyncManager {
             });
         }
 
-        let _ = db.set_module_sync_status(&module.id, "Syncing", None, None).await;
+        let _ = db
+            .set_module_sync_status(&module.id, "Syncing", None, None)
+            .await;
         let _ = ws.send(WsNotification {
             event: "catalog_sync_started".into(),
             payload: serde_json::json!({ "module_id": &module.id, "module_name": &module.name }),
@@ -137,10 +140,8 @@ impl CatalogSyncManager {
         let sync_result = tokio::task::spawn_blocking(move || {
             let eng = handle.block_on(async { engine_clone.lock().await });
             eng.update_catalog(&file_path, cancel_clone, |entries, progress| {
-                let items: Vec<(String, String)> = entries
-                    .into_iter()
-                    .map(|e| (e.title, e.link))
-                    .collect();
+                let items: Vec<(String, String)> =
+                    entries.into_iter().map(|e| (e.title, e.link)).collect();
 
                 let db_c = db_clone.clone();
                 let ws_c = ws_clone.clone();
@@ -180,7 +181,9 @@ impl CatalogSyncManager {
 
         match sync_result {
             Ok(Ok(total)) => {
-                let _ = db.set_module_sync_status(&module.id, "Completed", None, Some(total as i64)).await;
+                let _ = db
+                    .set_module_sync_status(&module.id, "Completed", None, Some(total as i64))
+                    .await;
                 let _ = ws.send(WsNotification {
                     event: "catalog_sync_completed".into(),
                     payload: serde_json::json!({ "module_id": &module.id, "total_mangas": total }),
@@ -190,7 +193,9 @@ impl CatalogSyncManager {
                 let is_cancelled = cancel_token.load(std::sync::atomic::Ordering::Relaxed);
                 let status = if is_cancelled { "Cancelled" } else { "Failed" };
                 let err_msg = e.to_string();
-                let _ = db.set_module_sync_status(&module.id, status, Some(&err_msg), None).await;
+                let _ = db
+                    .set_module_sync_status(&module.id, status, Some(&err_msg), None)
+                    .await;
                 let _ = ws.send(WsNotification {
                     event: "catalog_sync_failed".into(),
                     payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
@@ -198,7 +203,9 @@ impl CatalogSyncManager {
             }
             Err(e) => {
                 let err_msg = format!("Task error: {}", e);
-                let _ = db.set_module_sync_status(&module.id, "Failed", Some(&err_msg), None).await;
+                let _ = db
+                    .set_module_sync_status(&module.id, "Failed", Some(&err_msg), None)
+                    .await;
                 let _ = ws.send(WsNotification {
                     event: "catalog_sync_failed".into(),
                     payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
@@ -226,7 +233,10 @@ async fn handle_download_failure(
 ) {
     if retry_count < max_retries {
         let next_retry = retry_count + 1;
-        let retry_note = format!("Tentative {}/{} échouée ({})", next_retry, max_retries, err_msg);
+        let retry_note = format!(
+            "Tentative {}/{} échouée ({})",
+            next_retry, max_retries, err_msg
+        );
         warn!(
             "Download worker: [{}] '{}' - '{}' failed (attempt {}/{}): {}. Scheduling auto-retry in queue...",
             dl_id, manga_title, chapter_title, next_retry, max_retries, err_msg
@@ -259,13 +269,12 @@ async fn handle_download_failure(
             dl_id, manga_title, chapter_title, max_retries, err_msg
         );
 
-        let _ = sqlx::query(
-            "UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2"
-        )
-        .bind(err_msg)
-        .bind(dl_id)
-        .execute(dl_state.db.pool())
-        .await;
+        let _ =
+            sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
+                .bind(err_msg)
+                .bind(dl_id)
+                .execute(dl_state.db.pool())
+                .await;
 
         let _ = dl_state.ws_sender.send(WsNotification {
             event: "download_failed".into(),
@@ -292,7 +301,9 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
 
     // Scan modules if directory exists
     let modules = if Path::new("lua/modules").exists() {
-        engine_raw.scan_modules_dir("lua/modules").unwrap_or_default()
+        engine_raw
+            .scan_modules_dir("lua/modules")
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -325,7 +336,10 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                 }
             }
             Err(e) => {
-                warn!("Could not connect to NATS at {} ({}): running in local standalone mode", nats_url, e);
+                warn!(
+                    "Could not connect to NATS at {} ({}): running in local standalone mode",
+                    nats_url, e
+                );
                 None
             }
         }
@@ -362,14 +376,17 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             if let Ok(favorites) = bg_state.db.list_favorites_with_stats().await {
                 for fav in favorites {
                     if fav.enabled && fav.auto_download {
-                        info!("Scheduler: checking auto-download updates for favorite '{}'...", fav.title);
+                        info!(
+                            "Scheduler: checking auto-download updates for favorite '{}'...",
+                            fav.title
+                        );
                         let _ = check_favorite_internal(&bg_state, &fav).await;
                     }
                 }
             }
 
             // 2. Weekly auto-resync check (every 6 hours)
-            if hour_ticks % 6 == 0 {
+            if hour_ticks.is_multiple_of(6) {
                 info!("Background scheduler tick: checking modules for scheduled sync...");
                 if !bg_state.sync_manager.is_syncing().await {
                     if let Ok(statuses) = bg_state.db.list_all_sync_statuses().await {
@@ -380,14 +397,23 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                                 None => false,
                             };
                             if should_sync && st.status != "Syncing" {
-                                if let Some(m) = bg_state.modules.iter().find(|m| m.id == st.module_id).cloned() {
+                                if let Some(m) = bg_state
+                                    .modules
+                                    .iter()
+                                    .find(|m| m.id == st.module_id)
+                                    .cloned()
+                                {
                                     info!("Triggering weekly auto-resync for module {}", m.name);
-                                    bg_state.sync_manager.clone().run_sync(
-                                        m,
-                                        bg_state.engine.clone(),
-                                        bg_state.db.clone(),
-                                        bg_state.ws_sender.clone(),
-                                    ).await;
+                                    bg_state
+                                        .sync_manager
+                                        .clone()
+                                        .run_sync(
+                                            m,
+                                            bg_state.engine.clone(),
+                                            bg_state.db.clone(),
+                                            bg_state.ws_sender.clone(),
+                                        )
+                                        .await;
                                     break; // Only one sync at a time
                                 }
                             }
@@ -400,12 +426,14 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
 
     // Spawn background download queue worker (standalone mode only)
     if state.nats_context.is_some() {
-        info!("NATS JetStream is active: background downloads are delegated to external worker pods");
+        info!(
+            "NATS JetStream is active: background downloads are delegated to external worker pods"
+        );
     } else {
         let dl_state = state.clone();
         tokio::spawn(async move {
-        loop {
-            let pending_opt = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64)>(
+            loop {
+                let pending_opt = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64)>(
                 "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE status = 'Pending' ORDER BY created_at ASC LIMIT 1"
             )
             .fetch_optional(dl_state.db.pool())
@@ -413,296 +441,378 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             .ok()
             .flatten();
 
-            if let Some((dl_id, manga_title, chapter_title, chapter_url, module_id, format_str, retry_count, max_retries)) = pending_opt {
-                info!(
+                if let Some((
+                    dl_id,
+                    manga_title,
+                    chapter_title,
+                    chapter_url,
+                    module_id,
+                    format_str,
+                    retry_count,
+                    max_retries,
+                )) = pending_opt
+                {
+                    info!(
                     "Download worker: starting [{}] '{}' - '{}' [module: {}, format: {}, attempt: {}/{}]",
                     dl_id, manga_title, chapter_title, module_id, format_str, retry_count + 1, max_retries
                 );
 
-                let _ = sqlx::query("UPDATE downloads SET status = 'Downloading' WHERE id = ?1")
-                    .bind(&dl_id)
-                    .execute(dl_state.db.pool())
-                    .await;
+                    let _ =
+                        sqlx::query("UPDATE downloads SET status = 'Downloading' WHERE id = ?1")
+                            .bind(&dl_id)
+                            .execute(dl_state.db.pool())
+                            .await;
 
-                let _ = dl_state.ws_sender.send(WsNotification {
-                    event: "download_progress".into(),
-                    payload: serde_json::json!({
-                        "id": &dl_id,
-                        "status": "Downloading",
-                        "downloaded_pages": 0,
-                        "retry_count": retry_count,
-                        "max_retries": max_retries,
-                    }),
-                });
+                    let _ = dl_state.ws_sender.send(WsNotification {
+                        event: "download_progress".into(),
+                        payload: serde_json::json!({
+                            "id": &dl_id,
+                            "status": "Downloading",
+                            "downloaded_pages": 0,
+                            "retry_count": retry_count,
+                            "max_retries": max_retries,
+                        }),
+                    });
 
-                let module = dl_state.modules.iter().find(|m| m.id == module_id || m.name.eq_ignore_ascii_case(&module_id)).cloned();
+                    let module = dl_state
+                        .modules
+                        .iter()
+                        .find(|m| m.id == module_id || m.name.eq_ignore_ascii_case(&module_id))
+                        .cloned();
 
-                if let Some(m) = module {
-                    let file_path = m.file_path.clone();
-                    let url = chapter_url.clone();
-                    let pages_res = {
-                        let engine = dl_state.engine.lock().await;
-                        engine.get_chapter_pages(&file_path, &url)
-                    };
+                    if let Some(m) = module {
+                        let file_path = m.file_path.clone();
+                        let url = chapter_url.clone();
+                        let pages_res = {
+                            let engine = dl_state.engine.lock().await;
+                            engine.get_chapter_pages(&file_path, &url)
+                        };
 
-                    let pages = match pages_res {
-                        Ok(p) if !p.is_empty() => p,
-                        Ok(_) => {
-                            let err = "Aucune page trouvée pour ce chapitre".to_string();
-                            handle_download_failure(&dl_state, &dl_id, &manga_title, &chapter_title, retry_count, max_retries, &err).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            let err = format!("Erreur lors de la récupération des pages: {}", e);
-                            handle_download_failure(&dl_state, &dl_id, &manga_title, &chapter_title, retry_count, max_retries, &err).await;
-                            continue;
-                        }
-                    };
+                        let pages = match pages_res {
+                            Ok(p) if !p.is_empty() => p,
+                            Ok(_) => {
+                                let err = "Aucune page trouvée pour ce chapitre".to_string();
+                                handle_download_failure(
+                                    &dl_state,
+                                    &dl_id,
+                                    &manga_title,
+                                    &chapter_title,
+                                    retry_count,
+                                    max_retries,
+                                    &err,
+                                )
+                                .await;
+                                continue;
+                            }
+                            Err(e) => {
+                                let err =
+                                    format!("Erreur lors de la récupération des pages: {}", e);
+                                handle_download_failure(
+                                    &dl_state,
+                                    &dl_id,
+                                    &manga_title,
+                                    &chapter_title,
+                                    retry_count,
+                                    max_retries,
+                                    &err,
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
 
-                    let total = pages.len();
-                    let _ = sqlx::query("UPDATE downloads SET total_pages = ?1 WHERE id = ?2")
-                        .bind(total as i64)
-                        .bind(&dl_id)
-                        .execute(dl_state.db.pool())
-                        .await;
+                        let total = pages.len();
+                        let _ = sqlx::query("UPDATE downloads SET total_pages = ?1 WHERE id = ?2")
+                            .bind(total as i64)
+                            .bind(&dl_id)
+                            .execute(dl_state.db.pool())
+                            .await;
 
-                    info!(
-                        "Download worker: [{}] '{}' - '{}': {} pages to download",
-                        dl_id, manga_title, chapter_title, total
-                    );
+                        info!(
+                            "Download worker: [{}] '{}' - '{}': {} pages to download",
+                            dl_id, manga_title, chapter_title, total
+                        );
 
-                    let mut packer = fmd_core::ChapterPacker::new(manga_title.clone(), chapter_title.clone());
-                    let mut download_err = None;
+                        let mut packer = fmd_core::ChapterPacker::new(
+                            manga_title.clone(),
+                            chapter_title.clone(),
+                        );
+                        let mut download_err = None;
 
-                    let http = match fmd_net::HttpClient::new() {
-                        Ok(h) => h,
-                        Err(e) => {
-                            let err = format!("Erreur création HttpClient: {}", e);
-                            handle_download_failure(&dl_state, &dl_id, &manga_title, &chapter_title, retry_count, max_retries, &err).await;
-                            continue;
-                        }
-                    };
+                        let http = match fmd_net::HttpClient::new() {
+                            Ok(h) => h,
+                            Err(e) => {
+                                let err = format!("Erreur création HttpClient: {}", e);
+                                handle_download_failure(
+                                    &dl_state,
+                                    &dl_id,
+                                    &manga_title,
+                                    &chapter_title,
+                                    retry_count,
+                                    max_retries,
+                                    &err,
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
 
-                    for (idx, page_url) in pages.iter().enumerate() {
-                        const MAX_PAGE_RETRIES: usize = 3;
-                        let mut page_success = false;
-                        let mut last_page_err = String::new();
+                        for (idx, page_url) in pages.iter().enumerate() {
+                            const MAX_PAGE_RETRIES: usize = 3;
+                            let mut page_success = false;
+                            let mut last_page_err = String::new();
 
-                        for attempt in 1..=MAX_PAGE_RETRIES {
-                            let (custom_headers, custom_bytes) = {
-                                let engine = dl_state.engine.lock().await;
-                                let headers = engine
-                                    .prepare_download_image(&file_path, page_url, idx)
-                                    .unwrap_or_default();
-                                let maybe_bytes = engine
-                                    .download_custom_image(&file_path, page_url, idx)
-                                    .ok()
-                                    .flatten();
-                                (headers, maybe_bytes)
-                            };
+                            for attempt in 1..=MAX_PAGE_RETRIES {
+                                let (custom_headers, custom_bytes) = {
+                                    let engine = dl_state.engine.lock().await;
+                                    let headers = engine
+                                        .prepare_download_image(&file_path, page_url, idx)
+                                        .unwrap_or_default();
+                                    let maybe_bytes = engine
+                                        .download_custom_image(&file_path, page_url, idx)
+                                        .ok()
+                                        .flatten();
+                                    (headers, maybe_bytes)
+                                };
 
-                            let page_res = match custom_bytes {
-                                Some(bytes) => Ok(bytes),
-                                None => http.get_bytes_with_headers(page_url, &custom_headers).await,
-                            };
+                                let page_res = match custom_bytes {
+                                    Some(bytes) => Ok(bytes),
+                                    None => {
+                                        http.get_bytes_with_headers(page_url, &custom_headers).await
+                                    }
+                                };
 
-                            match page_res {
-                                Ok(bytes) if !bytes.is_empty() => {
-                                    let ext = if page_url.contains(".webp") {
-                                        "webp"
-                                    } else if page_url.contains(".png") {
-                                        "png"
-                                    } else {
-                                        "jpg"
-                                    };
-                                    let page_name = format!("{:03}.{}", idx + 1, ext);
-                                    packer.add_page(page_name, bytes);
+                                match page_res {
+                                    Ok(bytes) if !bytes.is_empty() => {
+                                        let ext = if page_url.contains(".webp") {
+                                            "webp"
+                                        } else if page_url.contains(".png") {
+                                            "png"
+                                        } else {
+                                            "jpg"
+                                        };
+                                        let page_name = format!("{:03}.{}", idx + 1, ext);
+                                        packer.add_page(page_name, bytes);
 
-                                    let _ = sqlx::query("UPDATE downloads SET downloaded_pages = ?1 WHERE id = ?2")
+                                        let _ = sqlx::query("UPDATE downloads SET downloaded_pages = ?1 WHERE id = ?2")
                                         .bind((idx + 1) as i64)
                                         .bind(&dl_id)
                                         .execute(dl_state.db.pool())
                                         .await;
 
-                                    let _ = dl_state.ws_sender.send(WsNotification {
-                                        event: "download_progress".into(),
-                                        payload: serde_json::json!({
-                                            "id": &dl_id,
-                                            "status": "Downloading",
-                                            "downloaded_pages": idx + 1,
-                                            "total_pages": total,
-                                            "retry_count": retry_count,
-                                            "max_retries": max_retries,
-                                        }),
-                                    });
+                                        let _ = dl_state.ws_sender.send(WsNotification {
+                                            event: "download_progress".into(),
+                                            payload: serde_json::json!({
+                                                "id": &dl_id,
+                                                "status": "Downloading",
+                                                "downloaded_pages": idx + 1,
+                                                "total_pages": total,
+                                                "retry_count": retry_count,
+                                                "max_retries": max_retries,
+                                            }),
+                                        });
 
-                                    if attempt > 1 {
-                                        info!(
+                                        if attempt > 1 {
+                                            info!(
                                             "Download worker: [{}] page {}/{} recovered on attempt {}/{}",
                                             dl_id, idx + 1, total, attempt, MAX_PAGE_RETRIES
                                         );
-                                    }
+                                        }
 
-                                    page_success = true;
-                                    break;
-                                }
-                                Ok(_) => {
-                                    last_page_err = format!("Page {} retournée vide", idx + 1);
-                                    warn!(
+                                        page_success = true;
+                                        break;
+                                    }
+                                    Ok(_) => {
+                                        last_page_err = format!("Page {} retournée vide", idx + 1);
+                                        warn!(
                                         "Download worker: [{}] page {}/{} attempt {}/{} failed: {}",
                                         dl_id, idx + 1, total, attempt, MAX_PAGE_RETRIES, last_page_err
                                     );
-                                }
-                                Err(e) => {
-                                    last_page_err = format!("Page {}: {}", idx + 1, e);
-                                    warn!(
+                                    }
+                                    Err(e) => {
+                                        last_page_err = format!("Page {}: {}", idx + 1, e);
+                                        warn!(
                                         "Download worker: [{}] page {}/{} attempt {}/{} failed: {}",
                                         dl_id, idx + 1, total, attempt, MAX_PAGE_RETRIES, e
                                     );
+                                    }
+                                }
+
+                                if attempt < MAX_PAGE_RETRIES {
+                                    tokio::time::sleep(Duration::from_millis(
+                                        1000 * attempt as u64,
+                                    ))
+                                    .await;
                                 }
                             }
 
-                            if attempt < MAX_PAGE_RETRIES {
-                                tokio::time::sleep(Duration::from_millis(1000 * attempt as u64)).await;
+                            if !page_success {
+                                download_err = Some(last_page_err);
+                                break;
                             }
                         }
 
-                        if !page_success {
-                            download_err = Some(last_page_err);
-                            break;
-                        }
-                    }
+                        if let Some(err) = download_err {
+                            handle_download_failure(
+                                &dl_state,
+                                &dl_id,
+                                &manga_title,
+                                &chapter_title,
+                                retry_count,
+                                max_retries,
+                                &err,
+                            )
+                            .await;
+                        } else {
+                            let settings = dl_state.db.get_settings().await.unwrap_or_default();
+                            let chap_num = fmd_core::extract_chapter_number(&chapter_title)
+                                .unwrap_or_default();
 
-                    if let Some(err) = download_err {
-                        handle_download_failure(&dl_state, &dl_id, &manga_title, &chapter_title, retry_count, max_retries, &err).await;
-                    } else {
-                        let settings = dl_state.db.get_settings().await.unwrap_or_default();
-                        let chap_num = fmd_core::extract_chapter_number(&chapter_title).unwrap_or_default();
-
-                        let prefix_id = format!("{}:%", module_id);
-                        let manga_meta = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Option<String>)>(
-                            r#"
+                            let prefix_id = format!("{}:%", module_id);
+                            let manga_meta = sqlx::query_as::<
+                                _,
+                                (
+                                    Option<String>,
+                                    Option<String>,
+                                    Option<String>,
+                                    Option<String>,
+                                ),
+                            >(
+                                r#"
                             SELECT author, genres, description, original_url
                             FROM mangas
                             WHERE title = ?1 OR id LIKE ?2
                             ORDER BY (author IS NOT NULL AND author != '') DESC, updated_at DESC
                             LIMIT 1
-                            "#
-                        )
-                        .bind(&manga_title)
-                        .bind(&prefix_id)
-                        .fetch_optional(dl_state.db.pool())
-                        .await
-                        .ok()
-                        .flatten();
+                            "#,
+                            )
+                            .bind(&manga_title)
+                            .bind(&prefix_id)
+                            .fetch_optional(dl_state.db.pool())
+                            .await
+                            .ok()
+                            .flatten();
 
-                        let genres_vec = manga_meta
-                            .as_ref()
-                            .and_then(|m| m.1.as_ref())
-                            .map(|g| {
-                                if let Ok(vec) = serde_json::from_str::<Vec<String>>(g) {
-                                    vec
-                                } else {
-                                    g.split(',')
-                                        .map(|s| s.trim().to_string())
-                                        .filter(|s| !s.is_empty())
-                                        .collect()
-                                }
-                            })
-                            .unwrap_or_default();
+                            let genres_vec = manga_meta
+                                .as_ref()
+                                .and_then(|m| m.1.as_ref())
+                                .map(|g| {
+                                    if let Ok(vec) = serde_json::from_str::<Vec<String>>(g) {
+                                        vec
+                                    } else {
+                                        g.split(',')
+                                            .map(|s| s.trim().to_string())
+                                            .filter(|s| !s.is_empty())
+                                            .collect()
+                                    }
+                                })
+                                .unwrap_or_default();
 
-                        let lang_iso = match m.category.to_lowercase().as_str() {
-                            "french" | "fr" => "fr",
-                            "english" | "en" => "en",
-                            "spanish" | "es" => "es",
-                            "japanese" | "ja" => "ja",
-                            _ => "en",
-                        };
+                            let lang_iso = match m.category.to_lowercase().as_str() {
+                                "french" | "fr" => "fr",
+                                "english" | "en" => "en",
+                                "spanish" | "es" => "es",
+                                "japanese" | "ja" => "ja",
+                                _ => "en",
+                            };
 
-                        packer.set_metadata(fmd_core::ChapterMetadata {
-                            series: manga_title.clone(),
-                            title: chapter_title.clone(),
-                            number: Some(chap_num.clone()),
-                            summary: manga_meta.as_ref().and_then(|m| m.2.clone()),
-                            writer: manga_meta.as_ref().and_then(|m| m.0.clone()),
-                            genres: genres_vec,
-                            web: manga_meta.as_ref().and_then(|m| m.3.clone()),
-                            language_iso: Some(lang_iso.to_string()),
-                        });
+                            packer.set_metadata(fmd_core::ChapterMetadata {
+                                series: manga_title.clone(),
+                                title: chapter_title.clone(),
+                                number: Some(chap_num.clone()),
+                                summary: manga_meta.as_ref().and_then(|m| m.2.clone()),
+                                writer: manga_meta.as_ref().and_then(|m| m.0.clone()),
+                                genres: genres_vec,
+                                web: manga_meta.as_ref().and_then(|m| m.3.clone()),
+                                language_iso: Some(lang_iso.to_string()),
+                            });
 
-                        let (fmt, ext) = match format_str.to_lowercase().as_str() {
-                            "cbz" | "cbr" => (fmd_core::PackagingFormat::Cbz, "cbz"),
-                            "pdf" => (fmd_core::PackagingFormat::Pdf, "pdf"),
-                            "epub" => (fmd_core::PackagingFormat::Epub, "epub"),
-                            _ => (fmd_core::PackagingFormat::Directory, ""),
-                        };
+                            let (fmt, ext) = match format_str.to_lowercase().as_str() {
+                                "cbz" | "cbr" => (fmd_core::PackagingFormat::Cbz, "cbz"),
+                                "pdf" => (fmd_core::PackagingFormat::Pdf, "pdf"),
+                                "epub" => (fmd_core::PackagingFormat::Epub, "epub"),
+                                _ => (fmd_core::PackagingFormat::Directory, ""),
+                            };
 
-                        let base_dir = std::path::Path::new(&settings.download_dir);
-                        let out_path = fmd_core::format_download_path(
-                            base_dir,
-                            &settings.naming_template,
-                            &manga_title,
-                            &chapter_title,
-                            &chap_num,
-                            &module_id,
-                            ext,
-                        );
+                            let base_dir = std::path::Path::new(&settings.download_dir);
+                            let out_path = fmd_core::format_download_path(
+                                base_dir,
+                                &settings.naming_template,
+                                &manga_title,
+                                &chapter_title,
+                                &chap_num,
+                                &module_id,
+                                ext,
+                            );
 
-                        info!(
-                            "Download worker: [{}] packaging '{}' - '{}' ({} pages) to {}...",
-                            dl_id, manga_title, chapter_title, total, format_str
-                        );
+                            info!(
+                                "Download worker: [{}] packaging '{}' - '{}' ({} pages) to {}...",
+                                dl_id, manga_title, chapter_title, total, format_str
+                            );
 
-                        match packer.pack_to(fmt, &out_path) {
-                            Ok(_) => {
-                                let _ = sqlx::query("UPDATE downloads SET status = 'Completed', downloaded_pages = total_pages, error_message = NULL WHERE id = ?1")
+                            match packer.pack_to(fmt, &out_path) {
+                                Ok(_) => {
+                                    let _ = sqlx::query("UPDATE downloads SET status = 'Completed', downloaded_pages = total_pages, error_message = NULL WHERE id = ?1")
                                     .bind(&dl_id)
                                     .execute(dl_state.db.pool())
                                     .await;
 
-                                let _ = dl_state.db.mark_chapter_downloaded("", &chapter_url).await;
+                                    let _ =
+                                        dl_state.db.mark_chapter_downloaded("", &chapter_url).await;
 
-                                info!(
+                                    info!(
                                     "Download worker: [{}] successfully completed '{}' - '{}' -> {}",
                                     dl_id, manga_title, chapter_title, out_path.display()
                                 );
 
-                                let _ = dl_state.ws_sender.send(WsNotification {
+                                    let _ = dl_state.ws_sender.send(WsNotification {
                                     event: "download_completed".into(),
                                     payload: serde_json::json!({ "id": &dl_id, "status": "Completed" }),
                                 });
-                            }
-                            Err(e) => {
-                                let err = format!("Erreur lors de l'archivage: {}", e);
-                                handle_download_failure(&dl_state, &dl_id, &manga_title, &chapter_title, retry_count, max_retries, &err).await;
+                                }
+                                Err(e) => {
+                                    let err = format!("Erreur lors de l'archivage: {}", e);
+                                    handle_download_failure(
+                                        &dl_state,
+                                        &dl_id,
+                                        &manga_title,
+                                        &chapter_title,
+                                        retry_count,
+                                        max_retries,
+                                        &err,
+                                    )
+                                    .await;
+                                }
                             }
                         }
-                    }
-                } else {
-                    let err = format!("Module '{}' introuvable", module_id);
-                    error!("Download worker: [{}] {}", dl_id, err);
-                    let _ = sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
+                    } else {
+                        let err = format!("Module '{}' introuvable", module_id);
+                        error!("Download worker: [{}] {}", dl_id, err);
+                        let _ = sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
                         .bind(&err)
                         .bind(&dl_id)
                         .execute(dl_state.db.pool())
                         .await;
 
-                    let _ = dl_state.ws_sender.send(WsNotification {
+                        let _ = dl_state.ws_sender.send(WsNotification {
                         event: "download_failed".into(),
                         payload: serde_json::json!({ "id": &dl_id, "status": "Failed", "error_message": &err }),
                     });
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
                 }
-            } else {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
             }
-        }
-    });
+        });
     }
 
     // Startup reconciliation: fix any chapters erroneously flagged as downloaded without a completed download record
     if let Ok(cleaned) = state.db.reconcile_downloaded_chapters().await {
         if cleaned > 0 {
-            info!("Reconciled {} erroneously marked downloaded chapters in database", cleaned);
+            info!(
+                "Reconciled {} erroneously marked downloaded chapters in database",
+                cleaned
+            );
         }
     }
 
@@ -726,21 +836,66 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(|| async { Html(ui::index_html()) }))
-        .route("/logo.png", get(|| async {
-            ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400")], LOGO_PNG)
-        }))
-        .route("/favicon.ico", get(|| async {
-            ([(axum::http::header::CONTENT_TYPE, "image/x-icon"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400")], FAVICON_ICO)
-        }))
-        .route("/favicon-32x32.png", get(|| async {
-            ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400")], FAVICON_32)
-        }))
-        .route("/favicon-16x16.png", get(|| async {
-            ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400")], FAVICON_16)
-        }))
-        .route("/apple-touch-icon.png", get(|| async {
-            ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400")], APPLE_TOUCH_ICON)
-        }))
+        .route(
+            "/logo.png",
+            get(|| async {
+                (
+                    [
+                        (axum::http::header::CONTENT_TYPE, "image/png"),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+                    ],
+                    LOGO_PNG,
+                )
+            }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async {
+                (
+                    [
+                        (axum::http::header::CONTENT_TYPE, "image/x-icon"),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+                    ],
+                    FAVICON_ICO,
+                )
+            }),
+        )
+        .route(
+            "/favicon-32x32.png",
+            get(|| async {
+                (
+                    [
+                        (axum::http::header::CONTENT_TYPE, "image/png"),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+                    ],
+                    FAVICON_32,
+                )
+            }),
+        )
+        .route(
+            "/favicon-16x16.png",
+            get(|| async {
+                (
+                    [
+                        (axum::http::header::CONTENT_TYPE, "image/png"),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+                    ],
+                    FAVICON_16,
+                )
+            }),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(|| async {
+                (
+                    [
+                        (axum::http::header::CONTENT_TYPE, "image/png"),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+                    ],
+                    APPLE_TOUCH_ICON,
+                )
+            }),
+        )
         .route("/api/health", get(|| async { "OK" }))
         .route("/api/version", get(|| async { env!("CARGO_PKG_VERSION") }))
         .route("/api/auth/status", get(auth::get_auth_status))
@@ -748,12 +903,30 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         .route("/api/auth/login", post(auth::auth_login))
         .route("/api/auth/logout", post(auth::auth_logout))
         .route("/api/auth/me", get(auth::auth_me))
-        .route("/api/auth/tokens", get(auth::list_api_tokens).post(auth::create_api_token_handler))
-        .route("/api/auth/tokens/{id}", delete(auth::delete_api_token_handler))
-        .route("/api/admin/users", get(auth::admin_list_users).post(auth::admin_create_user))
-        .route("/api/admin/users/{id}", put(auth::admin_update_user).delete(auth::admin_delete_user))
-        .route("/api/admin/cache/policies", get(auth::admin_list_cache_policies).post(auth::admin_set_cache_policy))
-        .route("/api/admin/cache/{manga_id}", delete(auth::admin_clear_manga_cache))
+        .route(
+            "/api/auth/tokens",
+            get(auth::list_api_tokens).post(auth::create_api_token_handler),
+        )
+        .route(
+            "/api/auth/tokens/{id}",
+            delete(auth::delete_api_token_handler),
+        )
+        .route(
+            "/api/admin/users",
+            get(auth::admin_list_users).post(auth::admin_create_user),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            put(auth::admin_update_user).delete(auth::admin_delete_user),
+        )
+        .route(
+            "/api/admin/cache/policies",
+            get(auth::admin_list_cache_policies).post(auth::admin_set_cache_policy),
+        )
+        .route(
+            "/api/admin/cache/{manga_id}",
+            delete(auth::admin_clear_manga_cache),
+        )
         .route("/api/modules", get(list_modules))
         .route("/api/mangas", get(list_mangas))
         .route("/api/manga/fetch", post(fetch_manga_info))
@@ -761,12 +934,18 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         .route("/api/manga/merge", post(merge_manga_sources))
         .route("/api/favorites", get(list_favorites).post(add_favorite))
         .route("/api/favorites/check-all", post(check_all_favorites))
-        .route("/api/favorites/{id}", delete(remove_favorite).patch(update_favorite_settings))
+        .route(
+            "/api/favorites/{id}",
+            delete(remove_favorite).patch(update_favorite_settings),
+        )
         .route("/api/favorites/{id}/check", post(check_single_favorite))
         .route("/api/favorites/{id}/chapters", get(list_favorite_chapters))
         .route("/api/downloads", get(list_downloads))
         .route("/api/downloads/queue", post(queue_downloads))
-        .route("/api/downloads/retry-failed", post(retry_all_failed_downloads))
+        .route(
+            "/api/downloads/retry-failed",
+            post(retry_all_failed_downloads),
+        )
         .route("/api/downloads/{id}", delete(remove_download))
         .route("/api/downloads/{id}/retry", post(retry_download))
         .route("/api/catalog/search", get(search_catalog))
@@ -774,7 +953,10 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         .route("/api/catalog/sync/{module_id}", post(trigger_catalog_sync))
         .route("/api/catalog/sync/cancel", post(cancel_catalog_sync))
         .route("/api/proxy/image", get(proxy_image))
-        .route("/api/settings", get(get_settings_handler).post(update_settings_handler))
+        .route(
+            "/api/settings",
+            get(get_settings_handler).post(update_settings_handler),
+        )
         .route("/api/internal/tasks/progress", post(internal_task_progress))
         .route("/api/internal/tasks/complete", post(internal_task_complete))
         .route("/api/ws", get(ws_handler))
@@ -913,8 +1095,16 @@ async fn fetch_manga_info(
                     let mut val = serde_json::to_value(&info).unwrap_or_default();
                     if let Some(obj) = val.as_object_mut() {
                         obj.insert("is_cached".to_string(), serde_json::Value::Bool(true));
-                        obj.insert("cached_at".to_string(), serde_json::to_value(cached.cached_at).unwrap_or(serde_json::Value::Null));
-                        obj.insert("expires_at".to_string(), serde_json::to_value(cached.expires_at).unwrap_or(serde_json::Value::Null));
+                        obj.insert(
+                            "cached_at".to_string(),
+                            serde_json::to_value(cached.cached_at)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                        obj.insert(
+                            "expires_at".to_string(),
+                            serde_json::to_value(cached.expires_at)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
                     }
                     return Ok(Json(val));
                 }
@@ -929,7 +1119,10 @@ async fn fetch_manga_info(
         .await
         .unwrap_or_default();
 
-    state.throttler.throttle(&req.module_id, policy.min_delay_ms).await;
+    state
+        .throttler
+        .throttle(&req.module_id, policy.min_delay_ms)
+        .await;
 
     let module = state
         .modules
@@ -945,16 +1138,19 @@ async fn fetch_manga_info(
     let engine = state.engine.lock().await;
     match engine.get_manga_info(&module.file_path, &req.url) {
         Ok(info) => {
-            let _ = state.db.upsert_manga_metadata(
-                &manga_id,
-                &req.module_id,
-                &info.title,
-                &req.url,
-                info.cover_url.as_deref(),
-                info.authors.as_deref(),
-                info.summary.as_deref(),
-                Some(&info.genres),
-            ).await;
+            let _ = state
+                .db
+                .upsert_manga_metadata(
+                    &manga_id,
+                    &req.module_id,
+                    &info.title,
+                    &req.url,
+                    info.cover_url.as_deref(),
+                    info.authors.as_deref(),
+                    info.summary.as_deref(),
+                    Some(&info.genres),
+                )
+                .await;
 
             let now = chrono::Utc::now();
             let expires_at = policy.calculate_expiration(now);
@@ -976,8 +1172,14 @@ async fn fetch_manga_info(
             let mut val = serde_json::to_value(&info).unwrap_or_default();
             if let Some(obj) = val.as_object_mut() {
                 obj.insert("is_cached".to_string(), serde_json::Value::Bool(false));
-                obj.insert("cached_at".to_string(), serde_json::to_value(now).unwrap_or(serde_json::Value::Null));
-                obj.insert("expires_at".to_string(), serde_json::to_value(expires_at).unwrap_or(serde_json::Value::Null));
+                obj.insert(
+                    "cached_at".to_string(),
+                    serde_json::to_value(now).unwrap_or(serde_json::Value::Null),
+                );
+                obj.insert(
+                    "expires_at".to_string(),
+                    serde_json::to_value(expires_at).unwrap_or(serde_json::Value::Null),
+                );
             }
             Ok(Json(val))
         }
@@ -1013,14 +1215,20 @@ async fn get_alternative_sources(
         return Json(Vec::new());
     }
 
-    let (items, _) = state.db.search_catalog(q, None, 50, 0).await.unwrap_or_default();
+    let (items, _) = state
+        .db
+        .search_catalog(q, None, 50, 0)
+        .await
+        .unwrap_or_default();
     let exclude = params.exclude_module.unwrap_or_default();
 
     let mut result = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     for item in items {
-        if !exclude.is_empty() && (item.module_id == exclude || item.module_id.eq_ignore_ascii_case(&exclude)) {
+        if !exclude.is_empty()
+            && (item.module_id == exclude || item.module_id.eq_ignore_ascii_case(&exclude))
+        {
             continue;
         }
 
@@ -1084,17 +1292,36 @@ async fn merge_manga_sources(
     let primary_module = state
         .modules
         .iter()
-        .find(|m| m.id == req.primary.module_id || m.name.eq_ignore_ascii_case(&req.primary.module_id))
+        .find(|m| {
+            m.id == req.primary.module_id || m.name.eq_ignore_ascii_case(&req.primary.module_id)
+        })
         .cloned()
-        .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, format!("Module primaire '{}' introuvable", req.primary.module_id)))?;
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("Module primaire '{}' introuvable", req.primary.module_id),
+            )
+        })?;
 
     let primary_chaps = match req.primary.chapters {
         Some(ch) if !ch.is_empty() => ch,
         _ => {
             let engine = state.engine.lock().await;
-            let info = engine.get_manga_info(&primary_module.file_path, &req.primary.url)
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Erreur source primaire: {}", e)))?;
-            info.chapters.into_iter().map(|c| fmd_core::ChapterItem { title: c.title, url: c.url }).collect()
+            let info = engine
+                .get_manga_info(&primary_module.file_path, &req.primary.url)
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Erreur source primaire: {}", e),
+                    )
+                })?;
+            info.chapters
+                .into_iter()
+                .map(|c| fmd_core::ChapterItem {
+                    title: c.title,
+                    url: c.url,
+                })
+                .collect()
         }
     };
 
@@ -1111,15 +1338,32 @@ async fn merge_manga_sources(
             .iter()
             .find(|m| m.id == sec.module_id || m.name.eq_ignore_ascii_case(&sec.module_id))
             .cloned()
-            .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, format!("Module secondaire '{}' introuvable", sec.module_id)))?;
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("Module secondaire '{}' introuvable", sec.module_id),
+                )
+            })?;
 
         let sec_chaps = match sec.chapters {
             Some(ch) if !ch.is_empty() => ch,
             _ => {
                 let engine = state.engine.lock().await;
-                let info = engine.get_manga_info(&sec_module.file_path, &sec.url)
-                    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Erreur source secondaire ({}): {}", sec_module.name, e)))?;
-                info.chapters.into_iter().map(|c| fmd_core::ChapterItem { title: c.title, url: c.url }).collect()
+                let info = engine
+                    .get_manga_info(&sec_module.file_path, &sec.url)
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Erreur source secondaire ({}): {}", sec_module.name, e),
+                        )
+                    })?;
+                info.chapters
+                    .into_iter()
+                    .map(|c| fmd_core::ChapterItem {
+                        title: c.title,
+                        url: c.url,
+                    })
+                    .collect()
             }
         };
 
@@ -1205,16 +1449,18 @@ async fn add_favorite(
                 eng.get_manga_info(&file_path, &url)
             };
             if let Ok(info) = chapters_res {
-                let _ = db.upsert_manga_metadata(
-                    &m_id,
-                    &mod_id,
-                    &info.title,
-                    &url,
-                    info.cover_url.as_deref(),
-                    info.authors.as_deref(),
-                    info.summary.as_deref(),
-                    Some(&info.genres),
-                ).await;
+                let _ = db
+                    .upsert_manga_metadata(
+                        &m_id,
+                        &mod_id,
+                        &info.title,
+                        &url,
+                        info.cover_url.as_deref(),
+                        info.authors.as_deref(),
+                        info.summary.as_deref(),
+                        Some(&info.genres),
+                    )
+                    .await;
                 let chaps: Vec<fmd_core::ChapterItem> = info
                     .chapters
                     .into_iter()
@@ -1239,7 +1485,9 @@ async fn add_favorite(
         }),
     });
 
-    Ok(Json(serde_json::json!({ "success": true, "manga_id": manga_id })))
+    Ok(Json(
+        serde_json::json!({ "success": true, "manga_id": manga_id }),
+    ))
 }
 
 async fn remove_favorite(
@@ -1271,7 +1519,11 @@ async fn list_favorites(
     auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
 ) -> Json<Vec<fmd_core::Favorite>> {
-    let favs = state.db.list_favorites_for_user(Some(&ctx.user.id)).await.unwrap_or_default();
+    let favs = state
+        .db
+        .list_favorites_for_user(Some(&ctx.user.id))
+        .await
+        .unwrap_or_default();
     Json(favs)
 }
 
@@ -1302,7 +1554,12 @@ async fn update_favorite_settings(
     let current = current_favs
         .into_iter()
         .find(|f| f.manga_id == id)
-        .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, "Favori introuvable".into()))?;
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "Favori introuvable".into(),
+            )
+        })?;
 
     let enabled = req.enabled.unwrap_or(current.enabled);
     let auto_download = req.auto_download.unwrap_or(current.auto_download);
@@ -1342,7 +1599,9 @@ async fn check_favorite_internal(
 
     let info = {
         let engine = state.engine.lock().await;
-        engine.get_manga_info(&file_path, &url).map_err(|e| e.to_string())?
+        engine
+            .get_manga_info(&file_path, &url)
+            .map_err(|e| e.to_string())?
     };
 
     let _ = state
@@ -1443,7 +1702,12 @@ async fn check_single_favorite(
     let fav = current_favs
         .into_iter()
         .find(|f| f.manga_id == id)
-        .ok_or_else(|| (axum::http::StatusCode::NOT_FOUND, "Favori introuvable".into()))?;
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "Favori introuvable".into(),
+            )
+        })?;
 
     let new_chaps = check_favorite_internal(&state, &fav)
         .await
@@ -1602,7 +1866,24 @@ async fn list_downloads(
     _auth: auth::RequireAuth,
     State(state): State<AppState>,
 ) -> Json<Vec<DownloadItem>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64, String, Option<String>, i64, i64, String)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            Option<String>,
+            i64,
+            i64,
+            String,
+        ),
+    >(
         r#"
         SELECT id, manga_title, chapter_title, chapter_url, module_id, format,
                total_pages, downloaded_pages, status, error_message,
@@ -1610,7 +1891,7 @@ async fn list_downloads(
         FROM downloads
         ORDER BY created_at DESC
         LIMIT 200
-        "#
+        "#,
     )
     .fetch_all(state.db.pool())
     .await
@@ -1618,8 +1899,8 @@ async fn list_downloads(
 
     let list = rows
         .into_iter()
-        .map(|(id, manga_title, chapter_title, chapter_url, module_id, format, total_pages, downloaded_pages, status, error_message, retry_count, max_retries, created_at)| {
-            DownloadItem {
+        .map(
+            |(
                 id,
                 manga_title,
                 chapter_title,
@@ -1633,8 +1914,24 @@ async fn list_downloads(
                 retry_count,
                 max_retries,
                 created_at,
-            }
-        })
+            )| {
+                DownloadItem {
+                    id,
+                    manga_title,
+                    chapter_title,
+                    chapter_url,
+                    module_id,
+                    format,
+                    total_pages,
+                    downloaded_pages,
+                    status,
+                    error_message,
+                    retry_count,
+                    max_retries,
+                    created_at,
+                }
+            },
+        )
         .collect();
 
     Json(list)
@@ -1656,16 +1953,19 @@ async fn queue_downloads(
 
     if let Some(ref m_url) = req.manga_url {
         let manga_id = format!("{}:{}", req.module_id, m_url);
-        let _ = state.db.upsert_manga_metadata(
-            &manga_id,
-            &req.module_id,
-            &req.manga_title,
-            m_url,
-            req.cover_url.as_deref(),
-            req.author.as_deref(),
-            req.description.as_deref(),
-            req.genres.as_deref(),
-        ).await;
+        let _ = state
+            .db
+            .upsert_manga_metadata(
+                &manga_id,
+                &req.module_id,
+                &req.manga_title,
+                m_url,
+                req.cover_url.as_deref(),
+                req.author.as_deref(),
+                req.description.as_deref(),
+                req.genres.as_deref(),
+            )
+            .await;
     }
 
     for ch in req.chapters {
@@ -1700,7 +2000,9 @@ async fn queue_downloads(
                     3,
                 );
                 if let Ok(bytes) = serde_json::to_vec(&task) {
-                    let _ = js.publish(fmd_core::SUBJECT_TASK_DOWNLOAD, bytes.into()).await;
+                    let _ = js
+                        .publish(fmd_core::SUBJECT_TASK_DOWNLOAD, bytes.into())
+                        .await;
                 }
             }
         }
@@ -1711,7 +2013,9 @@ async fn queue_downloads(
         payload: serde_json::json!({ "count": queued }),
     });
 
-    Ok(Json(serde_json::json!({ "success": true, "queued": queued })))
+    Ok(Json(
+        serde_json::json!({ "success": true, "queued": queued }),
+    ))
 }
 
 async fn remove_download(
@@ -1887,12 +2191,13 @@ async fn internal_task_complete(
         .execute(state.db.pool())
         .await;
 
-        let ch_url = sqlx::query_scalar::<_, String>("SELECT chapter_url FROM downloads WHERE id = ?1")
-            .bind(&req.task_id)
-            .fetch_optional(state.db.pool())
-            .await
-            .ok()
-            .flatten();
+        let ch_url =
+            sqlx::query_scalar::<_, String>("SELECT chapter_url FROM downloads WHERE id = ?1")
+                .bind(&req.task_id)
+                .fetch_optional(state.db.pool())
+                .await
+                .ok()
+                .flatten();
 
         if let Some(url) = ch_url {
             let _ = state.db.mark_chapter_downloaded("", &url).await;
@@ -1907,13 +2212,16 @@ async fn internal_task_complete(
             }),
         });
     } else {
-        let _ = sqlx::query(
-            "UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2"
-        )
-        .bind(req.error_message.as_deref().unwrap_or("Worker task execution failure"))
-        .bind(&req.task_id)
-        .execute(state.db.pool())
-        .await;
+        let _ =
+            sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
+                .bind(
+                    req.error_message
+                        .as_deref()
+                        .unwrap_or("Worker task execution failure"),
+                )
+                .bind(&req.task_id)
+                .execute(state.db.pool())
+                .await;
 
         let _ = state.ws_sender.send(WsNotification {
             event: "download_failed".into(),
@@ -1951,7 +2259,7 @@ async fn search_catalog(
 ) -> Json<CatalogResponse> {
     let q = params.q.unwrap_or_default();
     let m_id = params.module_id.filter(|s| !s.is_empty() && s != "all");
-    let limit = params.limit.unwrap_or(50).max(1).min(200);
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
 
     let (items, total) = state
@@ -2059,9 +2367,12 @@ async fn proxy_image(
     _auth: auth::RequireAuth,
     Query(params): Query<ProxyImageQuery>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
-    let safe_url = fmd_net::validate_safe_url(&params.url)
-        .await
-        .map_err(|e| (axum::http::StatusCode::FORBIDDEN, format!("SSRF protection rejected request: {}", e)))?;
+    let safe_url = fmd_net::validate_safe_url(&params.url).await.map_err(|e| {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            format!("SSRF protection rejected request: {}", e),
+        )
+    })?;
 
     let client = fmd_net::HttpClient::new()
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2072,13 +2383,21 @@ async fn proxy_image(
             headers.insert("Referer".to_string(), safe_ref.to_string());
         }
     } else if let Some(host) = safe_url.host_str() {
-        headers.insert("Referer".to_string(), format!("{}://{}/", safe_url.scheme(), host));
+        headers.insert(
+            "Referer".to_string(),
+            format!("{}://{}/", safe_url.scheme(), host),
+        );
     }
 
     let bytes = client
         .get_bytes_with_headers(safe_url.as_str(), &headers)
         .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, format!("Failed to proxy image: {}", e)))?;
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("Failed to proxy image: {}", e),
+            )
+        })?;
 
     let lower = safe_url.path().to_lowercase();
     let content_type = if lower.ends_with(".webp") || params.url.to_lowercase().contains(".webp") {
@@ -2170,7 +2489,7 @@ mod tests {
         handle_download_failure(&state, dl_id, "Manga A", "Ch. 1", 0, 3, "HTTP 500").await;
 
         let row1 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1"
+            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
         )
         .bind(dl_id)
         .fetch_one(db.pool())
@@ -2185,7 +2504,7 @@ mod tests {
         handle_download_failure(&state, dl_id, "Manga A", "Ch. 1", 2, 3, "HTTP 503").await;
 
         let row2 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1"
+            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
         )
         .bind(dl_id)
         .fetch_one(db.pool())
@@ -2199,7 +2518,7 @@ mod tests {
         handle_download_failure(&state, dl_id, "Manga A", "Ch. 1", 3, 3, "HTTP 504").await;
 
         let row3 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1"
+            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
         )
         .bind(dl_id)
         .fetch_one(db.pool())
@@ -2229,11 +2548,13 @@ mod tests {
             is_api_token: false,
         };
 
-        let res = retry_all_failed_downloads(auth::RequireAuth(test_ctx), State(state.clone())).await.unwrap();
+        let res = retry_all_failed_downloads(auth::RequireAuth(test_ctx), State(state.clone()))
+            .await
+            .unwrap();
         assert_eq!(res.0["count"], 1);
 
         let row4 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1"
+            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
         )
         .bind(dl_id)
         .fetch_one(db.pool())
@@ -2250,7 +2571,11 @@ mod tests {
         let db = Database::new(":memory:").await.unwrap();
 
         let manga_id = "test_mod:https://example.com/one-piece";
-        let genres = vec!["Action".to_string(), "Aventure".to_string(), "Comédie".to_string()];
+        let genres = vec![
+            "Action".to_string(),
+            "Aventure".to_string(),
+            "Comédie".to_string(),
+        ];
 
         db.upsert_manga_metadata(
             manga_id,
@@ -2267,14 +2592,22 @@ mod tests {
 
         // Query metadata from database
         let prefix_id = "test_mod:%";
-        let manga_meta = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Option<String>)>(
+        let manga_meta = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
             r#"
             SELECT author, genres, description, original_url
             FROM mangas
             WHERE title = ?1 OR id LIKE ?2
             ORDER BY (author IS NOT NULL AND author != '') DESC, updated_at DESC
             LIMIT 1
-            "#
+            "#,
         )
         .bind("One Piece")
         .bind(prefix_id)
@@ -2284,8 +2617,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(manga_meta.0.as_deref(), Some("Eiichiro Oda"));
-        assert_eq!(manga_meta.2.as_deref(), Some("L'histoire de Monkey D. Luffy"));
-        assert_eq!(manga_meta.3.as_deref(), Some("https://example.com/one-piece"));
+        assert_eq!(
+            manga_meta.2.as_deref(),
+            Some("L'histoire de Monkey D. Luffy")
+        );
+        assert_eq!(
+            manga_meta.3.as_deref(),
+            Some("https://example.com/one-piece")
+        );
 
         let genres_vec = manga_meta
             .1
@@ -2378,7 +2717,9 @@ mod tests {
             is_api_token: false,
         };
 
-        let res = queue_downloads(auth::RequireAuth(test_ctx), State(state.clone()), Json(req)).await.unwrap();
+        let res = queue_downloads(auth::RequireAuth(test_ctx), State(state.clone()), Json(req))
+            .await
+            .unwrap();
         assert_eq!(res.0["queued"], 2);
 
         let items = sqlx::query_as::<_, (String, String, String, String)>(
@@ -2415,19 +2756,21 @@ mod tests {
 
         // Initially no users -> setup_needed must be true
         let status1 = auth::get_auth_status(State(state.clone()), auth::MaybeAuth(None)).await;
-        assert_eq!(status1.setup_needed, true);
-        assert_eq!(status1.authenticated, false);
+        assert!(status1.setup_needed);
+        assert!(!status1.authenticated);
 
         // Simulate environment variables injected by Kubernetes Secret
         std::env::set_var("FMD_ADMIN_USER", "k8s_admin");
         std::env::set_var("FMD_ADMIN_PASSWORD", "SuperSecurePassword123!");
 
-        auth::bootstrap_admin_from_env_or_secret(&state.db).await.unwrap();
+        auth::bootstrap_admin_from_env_or_secret(&state.db)
+            .await
+            .unwrap();
         assert_eq!(state.db.count_users().await.unwrap(), 1);
 
         // After bootstrap -> setup_needed must be false (wizard bypassed)
         let status2 = auth::get_auth_status(State(state.clone()), auth::MaybeAuth(None)).await;
-        assert_eq!(status2.setup_needed, false);
+        assert!(!status2.setup_needed);
 
         // Login with bootstrapped admin credentials
         let (headers, login_res) = auth::auth_login(
@@ -2449,9 +2792,13 @@ mod tests {
         // Test logout
         let mut req_headers = axum::http::HeaderMap::new();
         let cookie_str = headers.get("set-cookie").unwrap().to_str().unwrap();
-        req_headers.insert("cookie", axum::http::HeaderValue::from_str(cookie_str).unwrap());
+        req_headers.insert(
+            "cookie",
+            axum::http::HeaderValue::from_str(cookie_str).unwrap(),
+        );
 
-        let (logout_headers, logout_res) = auth::auth_logout(State(state.clone()), req_headers).await;
+        let (logout_headers, logout_res) =
+            auth::auth_logout(State(state.clone()), req_headers).await;
         assert_eq!(logout_res["status"], "ok");
         let logout_cookie = logout_headers.get("set-cookie").unwrap().to_str().unwrap();
         assert!(logout_cookie.contains("fmd_session=;"));

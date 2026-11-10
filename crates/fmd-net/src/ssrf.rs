@@ -101,9 +101,9 @@ pub async fn validate_safe_url(raw_url: &str) -> Result<Url> {
         )));
     }
 
-    let host_str = parsed.host_str().ok_or_else(|| {
-        NetError::SsrfBlocked("URL missing host component".to_string())
-    })?;
+    let host_str = parsed
+        .host_str()
+        .ok_or_else(|| NetError::SsrfBlocked("URL missing host component".to_string()))?;
 
     let host_lower = host_str.to_lowercase();
     if host_lower == "localhost"
@@ -193,10 +193,14 @@ mod tests {
     async fn test_validate_safe_url_blocks_attacks() {
         assert!(validate_safe_url("file:///etc/passwd").await.is_err());
         assert!(validate_safe_url("gopher://127.0.0.1/").await.is_err());
-        assert!(validate_safe_url("http://127.0.0.1:8080/api").await.is_err());
+        assert!(validate_safe_url("http://127.0.0.1:8080/api")
+            .await
+            .is_err());
         assert!(validate_safe_url("http://localhost:8088/").await.is_err());
         assert!(validate_safe_url("http://test.localhost/").await.is_err());
-        assert!(validate_safe_url("http://169.254.169.254/latest/meta-data").await.is_err());
+        assert!(validate_safe_url("http://169.254.169.254/latest/meta-data")
+            .await
+            .is_err());
         assert!(validate_safe_url("http://10.0.0.5:9090").await.is_err());
         assert!(validate_safe_url("http://192.168.1.100").await.is_err());
     }

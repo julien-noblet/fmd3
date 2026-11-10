@@ -1,4 +1,3 @@
-use leptos::prelude::*;
 use crate::components::navbar::Navbar;
 use crate::views::catalog::CatalogView;
 use crate::views::downloads::DownloadsView;
@@ -8,6 +7,7 @@ use crate::views::modules::ModulesView;
 use crate::views::search::SearchView;
 use crate::views::settings::SettingsView;
 use crate::views::users::UsersView;
+use leptos::prelude::*;
 
 #[component]
 pub fn App() -> impl IntoView {

@@ -68,7 +68,10 @@ pub fn detect_chapter_gaps(numbers: &[f64]) -> Vec<ChapterGap> {
                 let description = if start == end {
                     format!("Chapitre {} manquant", start)
                 } else {
-                    format!("Chapitres {} à {} manquants ({} chapitres)", start, end, count)
+                    format!(
+                        "Chapitres {} à {} manquants ({} chapitres)",
+                        start, end, count
+                    )
                 };
 
                 gaps.push(ChapterGap {
@@ -153,7 +156,11 @@ pub fn merge_chapter_sources(
             if let Some(num) = num_opt {
                 let key = float_key(num);
                 if let Some(existing) = numbered_map.get_mut(&key) {
-                    if !existing.available_sources.iter().any(|s| s.module_id == fallback_mod_id && s.url == ch.url) {
+                    if !existing
+                        .available_sources
+                        .iter()
+                        .any(|s| s.module_id == fallback_mod_id && s.url == ch.url)
+                    {
                         existing.available_sources.push(src);
                     }
                 } else {
@@ -175,8 +182,12 @@ pub fn merge_chapter_sources(
                     numbered_map.insert(key, item);
                 }
             } else {
-                let exists = unnumbered_primary.iter().any(|p| p.title.eq_ignore_ascii_case(&ch.title))
-                    || unnumbered_fallback.iter().any(|f| f.title.eq_ignore_ascii_case(&ch.title));
+                let exists = unnumbered_primary
+                    .iter()
+                    .any(|p| p.title.eq_ignore_ascii_case(&ch.title))
+                    || unnumbered_fallback
+                        .iter()
+                        .any(|f| f.title.eq_ignore_ascii_case(&ch.title));
 
                 if !exists {
                     let item = MergedChapterItem {
@@ -228,28 +239,63 @@ mod tests {
         assert_eq!(gaps[0].start, 4.0);
         assert_eq!(gaps[0].end, 267.0);
         assert_eq!(gaps[0].count, 264);
-        assert!(gaps[0].description.contains("Chapitres 4 à 267 manquants (264 chapitres)"));
+        assert!(gaps[0]
+            .description
+            .contains("Chapitres 4 à 267 manquants (264 chapitres)"));
     }
 
     #[test]
     fn test_merge_chapter_sources_gap_fill() {
         let primary_mod = ("mangaplus", "MangaPlus");
         let primary_chaps = vec![
-            ChapterItem { title: "001 Ryomen Sukuna".into(), url: "mp/1".into() },
-            ChapterItem { title: "002 Secret Execution".into(), url: "mp/2".into() },
-            ChapterItem { title: "003 For Myself".into(), url: "mp/3".into() },
-            ChapterItem { title: "270 From Here On".into(), url: "mp/270".into() },
-            ChapterItem { title: "271 Final Chapter".into(), url: "mp/271".into() },
+            ChapterItem {
+                title: "001 Ryomen Sukuna".into(),
+                url: "mp/1".into(),
+            },
+            ChapterItem {
+                title: "002 Secret Execution".into(),
+                url: "mp/2".into(),
+            },
+            ChapterItem {
+                title: "003 For Myself".into(),
+                url: "mp/3".into(),
+            },
+            ChapterItem {
+                title: "270 From Here On".into(),
+                url: "mp/270".into(),
+            },
+            ChapterItem {
+                title: "271 Final Chapter".into(),
+                url: "mp/271".into(),
+            },
         ];
 
         let secondary_mod = ("sushiscan", "SushiScan");
         let secondary_chaps = vec![
-            ChapterItem { title: "Chapitre 1".into(), url: "ss/1".into() },
-            ChapterItem { title: "Chapitre 2".into(), url: "ss/2".into() },
-            ChapterItem { title: "Chapitre 3".into(), url: "ss/3".into() },
-            ChapterItem { title: "Chapitre 4".into(), url: "ss/4".into() },
-            ChapterItem { title: "Chapitre 5".into(), url: "ss/5".into() },
-            ChapterItem { title: "Chapitre 270".into(), url: "ss/270".into() },
+            ChapterItem {
+                title: "Chapitre 1".into(),
+                url: "ss/1".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 2".into(),
+                url: "ss/2".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 3".into(),
+                url: "ss/3".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 4".into(),
+                url: "ss/4".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 5".into(),
+                url: "ss/5".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 270".into(),
+                url: "ss/270".into(),
+            },
         ];
 
         let res = merge_chapter_sources(
@@ -266,21 +312,21 @@ mod tests {
         // Chapter 1: selected = MangaPlus, available = MangaPlus + SushiScan
         let ch1 = &res.chapters[0];
         assert_eq!(ch1.chapter_number, Some(1.0));
-        assert_eq!(ch1.is_gap_fill, false);
+        assert!(!ch1.is_gap_fill);
         assert_eq!(ch1.selected_source.module_id, "mangaplus");
         assert_eq!(ch1.available_sources.len(), 2);
 
         // Chapter 4: selected = SushiScan, available = SushiScan, is_gap_fill = true
         let ch4 = &res.chapters[3];
         assert_eq!(ch4.chapter_number, Some(4.0));
-        assert_eq!(ch4.is_gap_fill, true);
+        assert!(ch4.is_gap_fill);
         assert_eq!(ch4.selected_source.module_id, "sushiscan");
         assert_eq!(ch4.available_sources.len(), 1);
 
         // Chapter 271: selected = MangaPlus, available = MangaPlus
         let ch271 = &res.chapters[6];
         assert_eq!(ch271.chapter_number, Some(271.0));
-        assert_eq!(ch271.is_gap_fill, false);
+        assert!(!ch271.is_gap_fill);
         assert_eq!(ch271.selected_source.module_id, "mangaplus");
     }
 }

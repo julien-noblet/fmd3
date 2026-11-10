@@ -32,6 +32,7 @@ pub struct TaskMessage {
 }
 
 impl TaskMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_download(
         download_id: String,
         manga_title: String,

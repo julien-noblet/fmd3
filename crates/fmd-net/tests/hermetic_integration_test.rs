@@ -52,7 +52,10 @@ async fn test_hermetic_end_to_end_scraper_and_cbz_packaging() {
     // 3. Test HttpClient fetching HTML
     let client = HttpClient::new().expect("HttpClient init");
     let series_url = format!("{}/manga/test-series", mock_server.uri());
-    let page_html = client.get_text(&series_url).await.expect("fetch series HTML");
+    let page_html = client
+        .get_text(&series_url)
+        .await
+        .expect("fetch series HTML");
     assert!(page_html.contains("Test Manga Series"));
     assert!(page_html.contains("Chapitre 1"));
 
@@ -85,7 +88,9 @@ async fn test_hermetic_end_to_end_scraper_and_cbz_packaging() {
     let temp_dir = std::env::temp_dir();
     let cbz_path = temp_dir.join(format!("test_archive_{}.cbz", uuid::Uuid::new_v4()));
 
-    packer.pack_to(PackagingFormat::Cbz, &cbz_path).expect("pack CBZ");
+    packer
+        .pack_to(PackagingFormat::Cbz, &cbz_path)
+        .expect("pack CBZ");
     assert!(cbz_path.exists());
 
     // 6. Verify CBZ archive contents
@@ -102,7 +107,9 @@ async fn test_hermetic_end_to_end_scraper_and_cbz_packaging() {
         let name = entry.name().expect("utf8 name");
         if name == "ComicInfo.xml" {
             found_comicinfo = true;
-            entry.read_to_string(&mut comic_info_xml).expect("read ComicInfo.xml");
+            entry
+                .read_to_string(&mut comic_info_xml)
+                .expect("read ComicInfo.xml");
         } else if name == "001.png" {
             found_page1 = true;
         } else if name == "002.png" {
@@ -110,7 +117,10 @@ async fn test_hermetic_end_to_end_scraper_and_cbz_packaging() {
         }
     }
 
-    assert!(found_comicinfo, "ComicInfo.xml doit être présent dans l'archive CBZ");
+    assert!(
+        found_comicinfo,
+        "ComicInfo.xml doit être présent dans l'archive CBZ"
+    );
     assert!(found_page1, "001.png doit être présent dans l'archive CBZ");
     assert!(found_page2, "002.png doit être présent dans l'archive CBZ");
 

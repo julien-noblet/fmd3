@@ -75,14 +75,24 @@ mod tests {
 
         // 2. Search check
         let search_res: WasmSearchResult = instance
-            .call_json("_fmd_search", &WasmSearchQuery { query: "Mock".into() })
+            .call_json(
+                "_fmd_search",
+                &WasmSearchQuery {
+                    query: "Mock".into(),
+                },
+            )
             .expect("search call");
         assert_eq!(search_res.items.len(), 1);
         assert_eq!(search_res.items[0].title, "Mocked Manga 1");
 
         // 3. Manga info check
         let info_res: WasmMangaInfoResult = instance
-            .call_json("_fmd_get_info", &WasmMangaInfoQuery { url: "https://mock.wasm/manga/1".into() })
+            .call_json(
+                "_fmd_get_info",
+                &WasmMangaInfoQuery {
+                    url: "https://mock.wasm/manga/1".into(),
+                },
+            )
             .expect("manga info call");
         assert_eq!(info_res.title, "Mocked Manga 1");
         assert_eq!(info_res.author.as_deref(), Some("Author X"));
@@ -90,7 +100,12 @@ mod tests {
 
         // 4. Chapter pages check
         let pages_res: WasmPagesResult = instance
-            .call_json("_fmd_get_pages", &WasmPagesQuery { chapter_url: "https://mock.wasm/ch/1".into() })
+            .call_json(
+                "_fmd_get_pages",
+                &WasmPagesQuery {
+                    chapter_url: "https://mock.wasm/ch/1".into(),
+                },
+            )
             .expect("pages call");
         assert_eq!(pages_res.pages.len(), 2);
         assert_eq!(pages_res.pages[0], "https://mock.wasm/img/1.png");
@@ -121,13 +136,19 @@ mod tests {
         let items = module.search("test").expect("search");
         assert_eq!(items.len(), 1);
 
-        let info = module.get_manga_info("https://mock.wasm/manga/1").expect("info");
+        let info = module
+            .get_manga_info("https://mock.wasm/manga/1")
+            .expect("info");
         assert_eq!(info.title, "Mocked Manga 1");
 
-        let pages = module.get_chapter_pages("https://mock.wasm/ch/1").expect("pages");
+        let pages = module
+            .get_chapter_pages("https://mock.wasm/ch/1")
+            .expect("pages");
         assert_eq!(pages.len(), 2);
 
-        let processed = module.process_image(b"PNG_DATA", "001.png", "png").expect("process image");
+        let processed = module
+            .process_image(b"PNG_DATA", "001.png", "png")
+            .expect("process image");
         assert_eq!(processed, b"PNG_DATA");
 
         let _ = std::fs::remove_file(&wasm_file);
