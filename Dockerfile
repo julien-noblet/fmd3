@@ -19,10 +19,10 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 WORKDIR /usr/src/fmd3
 COPY . .
 
-# Build with BuildKit cache mounts for rapid compilation
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/usr/src/fmd3/target \
+# Build with BuildKit cache mounts isolated per architecture to prevent parallel race conditions
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git-${TARGETARCH},target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/usr/src/fmd3/target \
     if [ "$TARGETARCH" = "arm64" ]; then \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
                CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
