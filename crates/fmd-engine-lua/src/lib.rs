@@ -899,6 +899,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires live external network access"]
     fn test_lelscan_xpath_diagnostic() {
         let engine = LuaModuleEngine::new().unwrap();
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
@@ -967,6 +968,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live external network access"]
     async fn test_novelcool_fr_get_info() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let module_path =
@@ -986,6 +988,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live external network access"]
     async fn test_novelcool_fr_get_chapter_pages() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let module_path =
@@ -1006,6 +1009,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires live external network access"]
     fn test_novelcool_fr_fetch_catalog_page() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let module_path =
@@ -1039,6 +1043,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live external network access"]
     async fn test_sushiscan_cover_fetch() {
         let client = fmd_net::HttpClient::new().unwrap();
         let mut headers = std::collections::HashMap::new();
@@ -1056,6 +1061,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live external network access"]
     async fn test_mangaplus_get_info() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let module_path =
@@ -1080,6 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live external network access"]
     async fn test_mangaplus_french_info_and_download() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let module_path =
