@@ -17,11 +17,12 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
 pub mod auth;
+mod demo;
 
 const LOGO_PNG: &[u8] = include_bytes!("../../../images/logo-256.png");
 const FAVICON_ICO: &[u8] = include_bytes!("../../../images/favicon.ico");
@@ -32,9 +33,12 @@ const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../../images/apple-touch-icon
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    pub shared_cache: Option<Database>,
+    pub demo_shutdown: Option<watch::Receiver<bool>>,
     pub engine: Arc<Mutex<LuaModuleEngine>>,
     pub modules: Arc<Vec<WebsiteModule>>,
     pub ws_sender: broadcast::Sender<WsNotification>,
+    pub catalog_ws_sender: Option<broadcast::Sender<WsNotification>>,
     pub sync_manager: Arc<CatalogSyncManager>,
     pub nats_context: Option<async_nats::jetstream::Context>,
     pub throttler: auth::DomainThrottler,
@@ -42,10 +46,25 @@ pub struct AppState {
     pub internal_worker_token: String,
 }
 
+impl AppState {
+    fn cache_db(&self) -> &Database {
+        self.shared_cache.as_ref().unwrap_or(&self.db)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WsNotification {
     pub event: String,
     pub payload: serde_json::Value,
+}
+
+pub(crate) fn send_catalog_notification(
+    private_ws: &broadcast::Sender<WsNotification>,
+    catalog_ws: Option<&broadcast::Sender<WsNotification>>,
+    notification: WsNotification,
+) {
+    let sender = catalog_ws.unwrap_or(private_ws);
+    let _ = sender.send(notification);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,6 +118,7 @@ impl CatalogSyncManager {
         engine: Arc<Mutex<LuaModuleEngine>>,
         db: Database,
         ws: broadcast::Sender<WsNotification>,
+        catalog_ws: Option<broadcast::Sender<WsNotification>>,
     ) {
         let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -123,16 +143,21 @@ impl CatalogSyncManager {
         let _ = db
             .set_module_sync_status(&module.id, "Syncing", None, None)
             .await;
-        let _ = ws.send(WsNotification {
-            event: "catalog_sync_started".into(),
-            payload: serde_json::json!({ "module_id": &module.id, "module_name": &module.name }),
-        });
+        send_catalog_notification(
+            &ws,
+            catalog_ws.as_ref(),
+            WsNotification {
+                event: "catalog_sync_started".into(),
+                payload: serde_json::json!({ "module_id": &module.id, "module_name": &module.name }),
+            },
+        );
 
         let file_path = module.file_path.clone();
         let cancel_clone = cancel_token.clone();
         let engine_clone = engine.clone();
         let db_clone = db.clone();
         let ws_clone = ws.clone();
+        let catalog_ws_clone = catalog_ws.clone();
         let mod_id = module.id.clone();
         let mod_name = module.name.clone();
         let sm_clone = self.clone();
@@ -146,6 +171,7 @@ impl CatalogSyncManager {
 
                 let db_c = db_clone.clone();
                 let ws_c = ws_clone.clone();
+                let catalog_ws_c = catalog_ws_clone.clone();
                 let sm_c = sm_clone.clone();
                 let m_id = mod_id.clone();
                 let m_name = mod_name.clone();
@@ -161,18 +187,22 @@ impl CatalogSyncManager {
                             inf.items_found = progress.items_found;
                         }
                     }
-                    let _ = ws_c.send(WsNotification {
-                        event: "catalog_sync_progress".into(),
-                        payload: serde_json::json!({
-                            "module_id": m_id,
-                            "module_name": m_name,
-                            "directory_index": progress.directory_index,
-                            "total_directories": progress.total_directories,
-                            "current_page": progress.current_page,
-                            "total_pages": progress.total_pages,
-                            "items_found": progress.items_found,
-                        }),
-                    });
+                    send_catalog_notification(
+                        &ws_c,
+                        catalog_ws_c.as_ref(),
+                        WsNotification {
+                            event: "catalog_sync_progress".into(),
+                            payload: serde_json::json!({
+                                "module_id": m_id,
+                                "module_name": m_name,
+                                "directory_index": progress.directory_index,
+                                "total_directories": progress.total_directories,
+                                "current_page": progress.current_page,
+                                "total_pages": progress.total_pages,
+                                "items_found": progress.items_found,
+                            }),
+                        },
+                    );
                 });
 
                 Ok(())
@@ -185,10 +215,14 @@ impl CatalogSyncManager {
                 let _ = db
                     .set_module_sync_status(&module.id, "Completed", None, Some(total as i64))
                     .await;
-                let _ = ws.send(WsNotification {
-                    event: "catalog_sync_completed".into(),
-                    payload: serde_json::json!({ "module_id": &module.id, "total_mangas": total }),
-                });
+                send_catalog_notification(
+                    &ws,
+                    catalog_ws.as_ref(),
+                    WsNotification {
+                        event: "catalog_sync_completed".into(),
+                        payload: serde_json::json!({ "module_id": &module.id, "total_mangas": total }),
+                    },
+                );
             }
             Ok(Err(e)) => {
                 let is_cancelled = cancel_token.load(std::sync::atomic::Ordering::Relaxed);
@@ -197,20 +231,28 @@ impl CatalogSyncManager {
                 let _ = db
                     .set_module_sync_status(&module.id, status, Some(&err_msg), None)
                     .await;
-                let _ = ws.send(WsNotification {
-                    event: "catalog_sync_failed".into(),
-                    payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
-                });
+                send_catalog_notification(
+                    &ws,
+                    catalog_ws.as_ref(),
+                    WsNotification {
+                        event: "catalog_sync_failed".into(),
+                        payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
+                    },
+                );
             }
             Err(e) => {
                 let err_msg = format!("Task error: {}", e);
                 let _ = db
                     .set_module_sync_status(&module.id, "Failed", Some(&err_msg), None)
                     .await;
-                let _ = ws.send(WsNotification {
-                    event: "catalog_sync_failed".into(),
-                    payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
-                });
+                send_catalog_notification(
+                    &ws,
+                    catalog_ws.as_ref(),
+                    WsNotification {
+                        event: "catalog_sync_failed".into(),
+                        payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
+                    },
+                );
             }
         }
 
@@ -292,6 +334,9 @@ async fn handle_download_failure(
 
 pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     let base_path = base_path::from_env()?;
+    if let Some(config) = demo::DemoConfig::from_env()? {
+        return demo::run_server(addr, config, &base_path).await;
+    }
     let db = Database::new("data/fmd.db").await?;
 
     // Auto-bootstrap admin user if credentials provided via env or k8s secret
@@ -355,9 +400,12 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
 
     let state = AppState {
         db,
+        shared_cache: None,
+        demo_shutdown: None,
         engine,
         modules: Arc::new(modules),
         ws_sender: ws_sender.clone(),
+        catalog_ws_sender: None,
         sync_manager,
         nats_context,
         throttler,
@@ -414,6 +462,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                                             bg_state.engine.clone(),
                                             bg_state.db.clone(),
                                             bg_state.ws_sender.clone(),
+                                            bg_state.catalog_ws_sender.clone(),
                                         )
                                         .await;
                                     break; // Only one sync at a time
@@ -818,6 +867,14 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         }
     }
 
+    let app = with_base_path(build_router(state, &base_path), &base_path);
+    info!("Starting FMD3 San (三) Daemon on http://{}", addr);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_router(state: AppState, base_path: &str) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
         .allow_methods([
@@ -836,7 +893,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             axum::http::HeaderName::from_static("x-fmd-internal-token"),
         ]);
 
-    let index_html = Arc::<str>::from(ui::render_index_html(&base_path));
+    let index_html = Arc::<str>::from(ui::render_index_html(base_path));
     let root_index_html = index_html.clone();
     let fallback_index_html = index_html.clone();
     let app = Router::new()
@@ -909,6 +966,10 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         )
         .route("/api/health", get(|| async { "OK" }))
         .route("/api/version", get(|| async { env!("CARGO_PKG_VERSION") }))
+        .route(
+            "/api/demo/info",
+            get(|| async { Json(serde_json::json!({"demo": false})) }),
+        )
         .route("/api/auth/status", get(auth::get_auth_status))
         .route("/api/auth/setup", post(auth::auth_setup))
         .route("/api/auth/login", post(auth::auth_login))
@@ -976,14 +1037,8 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             async move { Html(html.to_string()) }
         }))
         .with_state(state);
-    let app = with_base_path(app, &base_path)
-        .layer(axum::middleware::from_fn(add_security_headers))
-        .layer(cors);
-
-    info!("Starting FMD3 San (三) Daemon on http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    app.layer(axum::middleware::from_fn(add_security_headers))
+        .layer(cors)
 }
 
 fn with_base_path(app: Router, base_path: &str) -> Router {
@@ -1129,24 +1184,52 @@ struct FetchMangaRequest {
     force_refresh: bool,
 }
 
+async fn save_fetched_manga_metadata(
+    db: &Database,
+    manga_id: &str,
+    req: &FetchMangaRequest,
+    info: &MangaInfoResult,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    db.upsert_manga_metadata(
+        manga_id,
+        &req.module_id,
+        &info.title,
+        &req.url,
+        info.cover_url.as_deref(),
+        info.authors.as_deref(),
+        info.summary.as_deref(),
+        Some(&info.genres),
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn fetch_manga_info(
     auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
     Json(req): Json<FetchMangaRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let allow_force = req.force_refresh && ctx.permissions.can_force_refresh;
+    load_manga_info(&state, &req, allow_force).await
+}
+
+async fn load_manga_info(
+    state: &AppState,
+    req: &FetchMangaRequest,
+    allow_force: bool,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let manga_id = format!("{}:{}", req.module_id, req.url);
-    let can_force = ctx.permissions.can_force_refresh;
-    let allow_force = req.force_refresh && can_force;
 
     // 1. Check cache if not forcing refresh
     if !allow_force {
-        if let Ok(Some(cached)) = state.db.get_manga_cache(&manga_id).await {
+        if let Ok(Some(cached)) = state.cache_db().get_manga_cache(&manga_id).await {
             if !cached.is_expired() {
                 if let (Ok(mut info), Ok(chapters)) = (
                     serde_json::from_str::<MangaInfoResult>(&cached.metadata_json),
                     serde_json::from_str::<Vec<fmd_engine_lua::ChapterItem>>(&cached.chapters_json),
                 ) {
                     info.chapters = chapters;
+                    save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
                     let mut val = serde_json::to_value(&info).unwrap_or_default();
                     if let Some(obj) = val.as_object_mut() {
                         obj.insert("is_cached".to_string(), serde_json::Value::Bool(true));
@@ -1167,9 +1250,16 @@ async fn fetch_manga_info(
         }
     }
 
+    if state.shared_cache.is_some() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Live scraping is unavailable in demo mode; manga is not in the public cache".into(),
+        ));
+    }
+
     // 2. Fetch fresh from engine with rate limiting
     let policy = state
-        .db
+        .cache_db()
         .get_module_cache_policy(&req.module_id)
         .await
         .unwrap_or_default();
@@ -1193,19 +1283,7 @@ async fn fetch_manga_info(
     let engine = state.engine.lock().await;
     match engine.get_manga_info(&module.file_path, &req.url) {
         Ok(info) => {
-            let _ = state
-                .db
-                .upsert_manga_metadata(
-                    &manga_id,
-                    &req.module_id,
-                    &info.title,
-                    &req.url,
-                    info.cover_url.as_deref(),
-                    info.authors.as_deref(),
-                    info.summary.as_deref(),
-                    Some(&info.genres),
-                )
-                .await;
+            save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
 
             let now = chrono::Utc::now();
             let expires_at = policy.calculate_expiration(now);
@@ -1222,7 +1300,9 @@ async fn fetch_manga_info(
                 cached_at: now,
                 expires_at,
             };
-            let _ = state.db.save_manga_cache(&cache_item).await;
+            if let Err(error) = state.cache_db().save_manga_cache(&cache_item).await {
+                warn!("Failed to cache manga {}: {error}", cache_item.manga_id);
+            }
 
             let mut val = serde_json::to_value(&info).unwrap_or_default();
             if let Some(obj) = val.as_object_mut() {
@@ -1243,6 +1323,21 @@ async fn fetch_manga_info(
             format!("Erreur lors de l'extraction: {}", e),
         )),
     }
+}
+
+async fn load_demo_manga_info(
+    state: &AppState,
+    module_id: &str,
+    url: &str,
+) -> Result<MangaInfoResult, (axum::http::StatusCode, String)> {
+    let req = FetchMangaRequest {
+        module_id: module_id.to_owned(),
+        url: url.to_owned(),
+        force_refresh: false,
+    };
+    let Json(value) = load_manga_info(state, &req, false).await?;
+    serde_json::from_value(value)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -1271,7 +1366,7 @@ async fn get_alternative_sources(
     }
 
     let (items, _) = state
-        .db
+        .cache_db()
         .search_catalog(q, None, 50, 0)
         .await
         .unwrap_or_default();
@@ -1361,15 +1456,19 @@ async fn merge_manga_sources(
     let primary_chaps = match req.primary.chapters {
         Some(ch) if !ch.is_empty() => ch,
         _ => {
-            let engine = state.engine.lock().await;
-            let info = engine
-                .get_manga_info(&primary_module.file_path, &req.primary.url)
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Erreur source primaire: {}", e),
-                    )
-                })?;
+            let info = if state.shared_cache.is_some() {
+                load_demo_manga_info(&state, &req.primary.module_id, &req.primary.url).await?
+            } else {
+                let engine = state.engine.lock().await;
+                engine
+                    .get_manga_info(&primary_module.file_path, &req.primary.url)
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Erreur source primaire: {}", e),
+                        )
+                    })?
+            };
             info.chapters
                 .into_iter()
                 .map(|c| fmd_core::ChapterItem {
@@ -1403,15 +1502,19 @@ async fn merge_manga_sources(
         let sec_chaps = match sec.chapters {
             Some(ch) if !ch.is_empty() => ch,
             _ => {
-                let engine = state.engine.lock().await;
-                let info = engine
-                    .get_manga_info(&sec_module.file_path, &sec.url)
-                    .map_err(|e| {
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Erreur source secondaire ({}): {}", sec_module.name, e),
-                        )
-                    })?;
+                let info = if state.shared_cache.is_some() {
+                    load_demo_manga_info(&state, &sec.module_id, &sec.url).await?
+                } else {
+                    let engine = state.engine.lock().await;
+                    engine
+                        .get_manga_info(&sec_module.file_path, &sec.url)
+                        .map_err(|e| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("Erreur source secondaire ({}): {}", sec_module.name, e),
+                            )
+                        })?
+                };
                 info.chapters
                     .into_iter()
                     .map(|c| fmd_core::ChapterItem {
@@ -1465,6 +1568,12 @@ async fn add_favorite(
     }
     let user_id = Some(ctx.user.id.as_str());
     let manga_id = format!("{}:{}", req.module_id, req.url);
+    if state.shared_cache.is_some() && req.auto_download == Some(true) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Automatic downloads are unavailable in demo mode".into(),
+        ));
+    }
     let auto_dl = req.auto_download.unwrap_or(false);
     let fmt = req.download_format.unwrap_or_else(|| "CBZ".into());
 
@@ -1498,33 +1607,48 @@ async fn add_favorite(
         let db = state.db.clone();
         let m_id = manga_id.clone();
         let mod_id = req.module_id.clone();
+        let demo_state = state.shared_cache.as_ref().map(|_| state.clone());
         tokio::spawn(async move {
-            let chapters_res = {
+            let chapters_res = if let Some(state) = demo_state {
+                load_demo_manga_info(&state, &mod_id, &url)
+                    .await
+                    .map_err(|(_, error)| error)
+            } else {
                 let eng = engine.lock().await;
                 eng.get_manga_info(&file_path, &url)
+                    .map_err(|e| e.to_string())
             };
-            if let Ok(info) = chapters_res {
-                let _ = db
-                    .upsert_manga_metadata(
-                        &m_id,
-                        &mod_id,
-                        &info.title,
-                        &url,
-                        info.cover_url.as_deref(),
-                        info.authors.as_deref(),
-                        info.summary.as_deref(),
-                        Some(&info.genres),
-                    )
-                    .await;
-                let chaps: Vec<fmd_core::ChapterItem> = info
-                    .chapters
-                    .into_iter()
-                    .map(|c| fmd_core::ChapterItem {
-                        title: c.title,
-                        url: c.url,
-                    })
-                    .collect();
-                let _ = db.record_chapters(&m_id, &chaps, false).await;
+            match chapters_res {
+                Ok(info) => {
+                    if let Err(error) = db
+                        .upsert_manga_metadata(
+                            &m_id,
+                            &mod_id,
+                            &info.title,
+                            &url,
+                            info.cover_url.as_deref(),
+                            info.authors.as_deref(),
+                            info.summary.as_deref(),
+                            Some(&info.genres),
+                        )
+                        .await
+                    {
+                        warn!("Failed to save favorite metadata for {m_id}: {error}");
+                        return;
+                    }
+                    let chaps: Vec<fmd_core::ChapterItem> = info
+                        .chapters
+                        .into_iter()
+                        .map(|c| fmd_core::ChapterItem {
+                            title: c.title,
+                            url: c.url,
+                        })
+                        .collect();
+                    if let Err(error) = db.record_chapters(&m_id, &chaps, false).await {
+                        warn!("Failed to record favorite chapters for {m_id}: {error}");
+                    }
+                }
+                Err(error) => warn!("Failed to prefetch favorite chapters for {m_id}: {error}"),
             }
         });
     }
@@ -1617,6 +1741,12 @@ async fn update_favorite_settings(
         })?;
 
     let enabled = req.enabled.unwrap_or(current.enabled);
+    if state.shared_cache.is_some() && req.auto_download == Some(true) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Automatic downloads are unavailable in demo mode".into(),
+        ));
+    }
     let auto_download = req.auto_download.unwrap_or(current.auto_download);
     let download_format = req.download_format.unwrap_or(current.download_format);
 
@@ -1642,21 +1772,28 @@ async fn update_favorite_settings(
 async fn check_favorite_internal(
     state: &AppState,
     fav: &fmd_core::Favorite,
-) -> Result<Vec<fmd_core::ChapterItem>, String> {
+) -> Result<Vec<fmd_core::ChapterItem>, (axum::http::StatusCode, String)> {
     let module = state
         .modules
         .iter()
         .find(|m| m.id == fav.module_id || m.name.eq_ignore_ascii_case(&fav.module_id))
-        .ok_or_else(|| format!("Module '{}' introuvable", fav.module_id))?;
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Module '{}' introuvable", fav.module_id),
+            )
+        })?;
 
     let file_path = module.file_path.clone();
     let url = fav.original_url.clone();
 
-    let info = {
+    let info = if state.shared_cache.is_some() {
+        load_demo_manga_info(state, &fav.module_id, &url).await?
+    } else {
         let engine = state.engine.lock().await;
         engine
             .get_manga_info(&file_path, &url)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
 
     let _ = state
@@ -1686,7 +1823,7 @@ async fn check_favorite_internal(
         .db
         .check_favorite_new_chapters(&fav.manga_id, &chapters)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !new_chapters.is_empty() {
         info!(
@@ -1764,9 +1901,7 @@ async fn check_single_favorite(
             )
         })?;
 
-    let new_chaps = check_favorite_internal(&state, &fav)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let new_chaps = check_favorite_internal(&state, &fav).await?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1796,9 +1931,13 @@ async fn check_all_favorites(
 
     for fav in current_favs {
         if fav.enabled {
-            if let Ok(new_chaps) = check_favorite_internal(&state, &fav).await {
-                checked_count += 1;
-                total_new += new_chaps.len();
+            match check_favorite_internal(&state, &fav).await {
+                Ok(new_chaps) => {
+                    checked_count += 1;
+                    total_new += new_chaps.len();
+                }
+                Err(error) if state.shared_cache.is_some() => return Err(error),
+                Err((_, error)) => warn!("Failed to check favorite {}: {error}", fav.manga_id),
             }
         }
     }
@@ -1850,6 +1989,11 @@ async fn ws_handler(
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut rx = state.ws_sender.subscribe();
+    let mut catalog_rx = state
+        .catalog_ws_sender
+        .as_ref()
+        .map(broadcast::Sender::subscribe);
+    let mut shutdown = state.demo_shutdown.clone();
 
     // Welcome message
     let welcome = serde_json::json!({
@@ -1860,6 +2004,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
+            _ = async {
+                match &mut shutdown {
+                    Some(signal) => { let _ = signal.changed().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
@@ -1870,6 +2023,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
             Ok(notif) = rx.recv() => {
+                if let Ok(json_str) = serde_json::to_string(&notif) {
+                    if socket.send(Message::Text(json_str.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Some(Ok(notif)) = async {
+                match &mut catalog_rx {
+                    Some(receiver) => Some(receiver.recv().await),
+                    None => std::future::pending::<Option<Result<WsNotification, broadcast::error::RecvError>>>().await,
+                }
+            } => {
                 if let Ok(json_str) = serde_json::to_string(&notif) {
                     if socket.send(Message::Text(json_str.into())).await.is_err() {
                         break;
@@ -2318,7 +2483,7 @@ async fn search_catalog(
     let offset = params.offset.unwrap_or(0).max(0);
 
     let (items, total) = state
-        .db
+        .cache_db()
         .search_catalog(&q, m_id.as_deref(), limit, offset)
         .await
         .unwrap_or_default();
@@ -2343,8 +2508,16 @@ async fn get_catalog_status(
     State(state): State<AppState>,
 ) -> Json<CatalogStatusResponse> {
     let active = state.sync_manager.get_active_info().await;
-    let modules = state.db.list_all_sync_statuses().await.unwrap_or_default();
-    let total_catalog_items = state.db.get_catalog_total_count().await.unwrap_or(0);
+    let modules = state
+        .cache_db()
+        .list_all_sync_statuses()
+        .await
+        .unwrap_or_default();
+    let total_catalog_items = state
+        .cache_db()
+        .get_catalog_total_count()
+        .await
+        .unwrap_or(0);
 
     Json(CatalogStatusResponse {
         active,
@@ -2385,11 +2558,12 @@ async fn trigger_catalog_sync(
 
     let sm = state.sync_manager.clone();
     let engine = state.engine.clone();
-    let db = state.db.clone();
+    let db = state.cache_db().clone();
     let ws = state.ws_sender.clone();
+    let catalog_ws = state.catalog_ws_sender.clone();
 
     tokio::spawn(async move {
-        sm.run_sync(module, engine, db, ws).await;
+        sm.run_sync(module, engine, db, ws, catalog_ws).await;
     });
 
     Ok(Json(serde_json::json!({
@@ -2479,9 +2653,15 @@ async fn proxy_image(
 }
 
 async fn get_settings_handler(
-    _admin: auth::RequireAdmin,
+    auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
 ) -> Result<Json<fmd_core::AppSettings>, (axum::http::StatusCode, String)> {
+    if state.shared_cache.is_none() && !ctx.user.is_admin() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Privilèges administrateur requis".into(),
+        ));
+    }
     let s = state
         .db
         .get_settings()
@@ -2491,10 +2671,16 @@ async fn get_settings_handler(
 }
 
 async fn update_settings_handler(
-    _admin: auth::RequireAdmin,
+    auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
     Json(new_settings): Json<fmd_core::AppSettings>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if state.shared_cache.is_none() && !ctx.user.is_admin() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Privilèges administrateur requis".into(),
+        ));
+    }
     state
         .db
         .update_settings(&new_settings)
@@ -2621,9 +2807,12 @@ mod tests {
         let sync_manager = Arc::new(CatalogSyncManager::new());
         let state = AppState {
             db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
+            catalog_ws_sender: None,
             sync_manager,
             nats_context: None,
             throttler: auth::DomainThrottler::new(),
@@ -2821,9 +3010,12 @@ mod tests {
         let sync_manager = Arc::new(CatalogSyncManager::new());
         let state = AppState {
             db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
+            catalog_ws_sender: None,
             sync_manager,
             nats_context: None,
             throttler: auth::DomainThrottler::new(),
@@ -2899,9 +3091,12 @@ mod tests {
         let sync_manager = Arc::new(CatalogSyncManager::new());
         let state = AppState {
             db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
+            catalog_ws_sender: None,
             sync_manager,
             nats_context: None,
             throttler: auth::DomainThrottler::new(),

@@ -129,7 +129,7 @@ pub fn SettingsView() -> impl IntoView {
                 </div>
 
                 // Card 4: Cache & Anti-ban Throttling
-                <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-xl space-y-5">
+                <div id="cache-policy-settings" class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-xl space-y-5">
                     <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
                         <h3 class="text-base font-bold text-white flex items-center gap-2">
                             <span>"🛡️"</span> <span data-i18n="settings.cache_title">"Cache Persistent & Délais Anti-Ban (Par Module)"</span>

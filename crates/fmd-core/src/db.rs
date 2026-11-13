@@ -12,6 +12,19 @@ pub struct Database {
 }
 
 impl Database {
+    pub async fn new_in_memory() -> Result<Self> {
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().in_memory(true))
+            .await?;
+        let db = Self { pool };
+        db.migrate().await?;
+        Ok(db)
+    }
+
     pub async fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let db_str = db_path
             .as_ref()

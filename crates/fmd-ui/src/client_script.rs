@@ -3,6 +3,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         // ==========================================
         let currentLocale = 'en';
         let ws = null;
+        let wsReconnectTimer = null;
         let allModules = [];
         let allFavorites = [];
         let currentInspectResult = null;
@@ -19,6 +20,125 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         let activeSyncInfo = null;
         let currentUser = null;
         let currentPermissions = null;
+        let demoMode = false;
+        let demoEnded = false;
+        let demoPolling = false;
+        let demoLastActivity = 0;
+
+        function demoSetEnded(value) {
+            demoEnded = value;
+            try {
+                sessionStorage.setItem('fmd_demo_ended', value ? '1' : '0');
+                if (value) sessionStorage.removeItem('fmd_demo_active');
+            } catch (e) {}
+        }
+
+        function demoSetActive() {
+            demoSetEnded(false);
+            try { sessionStorage.setItem('fmd_demo_active', '1'); } catch (e) {}
+        }
+
+        function demoMessage(key, params) {
+            const el = document.getElementById('demo-status');
+            if (el) el.textContent = t(key, params);
+        }
+
+        function endDemo(expired) {
+            demoSetEnded(true);
+            const dialog = document.getElementById('demo-dialog');
+            if (dialog && dialog.open) dialog.close();
+            currentUser = null;
+            currentPermissions = null;
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+            if (ws) {
+                ws.onclose = null;
+                ws.close();
+                ws = null;
+            }
+            showAuthGate('login');
+            const credentials = document.getElementById('demo-credentials');
+            const restart = document.getElementById('demo-restart');
+            const form = document.getElementById('login-form');
+            if (credentials) credentials.classList.add('hidden');
+            if (restart) restart.classList.remove('hidden');
+            if (form) form.classList.add('hidden');
+            demoMessage(expired ? 'demo.expired' : 'demo.ended');
+        }
+
+        async function pollDemoReservation() {
+            if (!demoMode || demoEnded || currentUser || demoPolling) return;
+            demoPolling = true;
+            try {
+                const res = await fetch('/api/demo/reservation', { method: 'POST' });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                if (demoEnded || currentUser) return;
+                const credentials = document.getElementById('demo-credentials');
+                const form = document.getElementById('login-form');
+                if (data.status === 'reserved') {
+                    demoMessage('demo.available');
+                    if (credentials) {
+                        credentials.textContent = t('demo.credentials', { username: data.username, password: data.password });
+                        credentials.classList.remove('hidden');
+                    }
+                    document.getElementById('login-username').value = data.username;
+                    document.getElementById('login-password').value = data.password;
+                    if (form) form.classList.remove('hidden');
+                } else if (data.status === 'waiting') {
+                    demoMessage('demo.waiting', { position: data.position });
+                    if (credentials) credentials.classList.add('hidden');
+                    if (form) form.classList.add('hidden');
+                } else if (data.status === 'active') {
+                    if (await checkAuthStatus()) loadAppData();
+                    else endDemo(true);
+                }
+            } catch (e) {
+                console.error('Demo reservation error:', e);
+                demoMessage('demo.unavailable');
+            } finally {
+                demoPolling = false;
+                if (!demoEnded && !currentUser) setTimeout(pollDemoReservation, 30000);
+            }
+        }
+
+        function restartDemo() {
+            demoSetEnded(false);
+            const restart = document.getElementById('demo-restart');
+            if (restart) restart.classList.add('hidden');
+            pollDemoReservation();
+        }
+
+        async function demoActivity(event) {
+            if (!demoMode || demoEnded || !event.isTrusted || Date.now() - demoLastActivity < 15000) return;
+            demoLastActivity = Date.now();
+            try {
+                const res = await fetch('/api/demo/activity', { method: 'POST' });
+                if (res.status === 401 && currentUser) endDemo(true);
+            } catch (e) {
+                console.error('Demo activity error:', e);
+            }
+        }
+
+        async function checkDemoSession() {
+            if (!demoMode) return;
+            if (currentUser && !demoEnded) {
+                try {
+                    const res = await fetch('/api/auth/status');
+                    if (!res.ok) throw new Error(await res.text());
+                    const data = await res.json();
+                    if (!data.authenticated) endDemo(true);
+                } catch (e) {
+                    console.error('Demo session check failed:', e);
+                }
+            }
+            setTimeout(checkDemoSession, 30000);
+        }
+
+        window.addEventListener('pointerdown', demoActivity);
+        window.addEventListener('pointermove', demoActivity);
+        window.addEventListener('wheel', demoActivity);
+        window.addEventListener('keydown', demoActivity);
 
         function getNestedValue(obj, keyPath) {
             if (!obj || !keyPath) return undefined;
@@ -260,7 +380,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 }
             } else if (tabId === 'settings') {
                 loadSettings();
-                loadCachePolicies();
+                if (!demoMode) loadCachePolicies();
             } else if (tabId === 'users') {
                 loadUsers();
             }
@@ -414,7 +534,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                                 ${f.enabled ? escapeHtml(t('common.active')) : escapeHtml(t('common.inactive'))}
                             </span>
                         </div>
-                        <div class="absolute top-2 right-2">
+                        <div class="absolute top-2 right-2 ${demoMode ? 'hidden' : ''}">
                             <button onclick="toggleAutoDownload('${escapeHtml(f.manga_id)}', ${!autoDlActive})" title="${autoDlActive ? escapeHtml(t('favorites.disable_auto_dl')) : escapeHtml(t('favorites.enable_auto_dl'))}" class="px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 ${autoDlActive ? 'bg-red-600 text-white shadow' : 'bg-zinc-900/80 text-zinc-400 border border-zinc-700 hover:text-white'}">
                                 <span>⚡</span> ${escapeHtml(t('favorites.auto_dl'))}: ${autoDlActive ? escapeHtml(t('common.on')) : escapeHtml(t('common.off'))}
                             </button>
@@ -603,13 +723,16 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             const icon = document.getElementById('sync-icon');
             const label = document.getElementById('sync-label');
             if (!btn || !icon || !label) return;
+            btn.classList.toggle('hidden', demoMode);
+            if (demoMode) return;
 
             if (activeSyncInfo) {
                 btn.className = "px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg text-sm transition flex items-center gap-2 shadow-lg shadow-amber-600/20";
-                icon.textContent = "⏹️";
-                label.textContent = t("catalog.sync_stop");
-                btn.disabled = false;
-                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                icon.textContent = demoMode ? "🔄" : "⏹️";
+                label.textContent = t(demoMode ? "catalog.syncing" : "catalog.sync_stop");
+                btn.disabled = demoMode;
+                btn.classList.toggle('opacity-50', demoMode);
+                btn.classList.toggle('cursor-not-allowed', demoMode);
                 return;
             }
 
@@ -668,9 +791,11 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         }
 
         async function toggleCatalogSync() {
+            if (demoMode) return;
             if (activeSyncInfo) {
                 try {
-                    await fetch('/api/catalog/sync/cancel', { method: 'POST' });
+                    const response = await fetch('/api/catalog/sync/cancel', { method: 'POST' });
+                    if (!response.ok) throw new Error(await response.text());
                     activeSyncInfo = null;
                     updateSyncBanner(null);
                     updateSyncButton();
@@ -1517,6 +1642,9 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         }
 
         function connectWs() {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+            if (!currentUser || (demoMode && demoEnded)) return;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${window.location.host}${BASE_PATH}/api/ws`);
 
@@ -1577,7 +1705,10 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     badge.className = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950 text-amber-400 border border-amber-800';
                     badge.innerHTML = '<span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-amber-400"></span> ' + t('nav.ws_reconnecting');
                 }
-                setTimeout(connectWs, 3000);
+                if (currentUser && !(demoMode && demoEnded)) {
+                    clearTimeout(wsReconnectTimer);
+                    wsReconnectTimer = setTimeout(connectWs, 3000);
+                }
             };
         }
 
@@ -1653,6 +1784,10 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         };
 
         function handleSessionExpired() {
+            if (demoMode) {
+                if (currentUser) endDemo(true);
+                return;
+            }
             currentUser = null;
             currentPermissions = null;
             if (ws) {
@@ -1745,6 +1880,12 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 } else {
                     usersBtn.classList.add('hidden');
                 }
+                if (demoMode) {
+                    ['btn-dl-queue', 'btn-queue-merged', 'btn-retry-failed', 'cache-policy-settings'].forEach(id => {
+                        const element = document.getElementById(id);
+                        if (element) element.style.display = 'none';
+                    });
+                }
             }
         }
 
@@ -1760,6 +1901,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 if (data.authenticated && data.user) {
                     currentUser = data.user;
                     currentPermissions = data.permissions;
+                    if (demoMode) demoSetActive();
                     showMainApp(data.user);
                     return true;
                 } else {
@@ -1843,6 +1985,15 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 currentUser = data.user;
                 currentPermissions = data.permissions;
                 showMainApp(data.user);
+                if (demoMode) {
+                    demoLastActivity = 0;
+                    demoSetActive();
+                    const dialog = document.getElementById('demo-dialog');
+                    if (dialog && !dialog.open) {
+                        document.getElementById('tab-btn-favorites')?.focus();
+                        dialog.showModal();
+                    }
+                }
                 loadAppData();
             } catch (e) {
                 if (errEl) {
@@ -1854,9 +2005,18 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
 
         async function logout() {
             try {
-                await fetch('/api/auth/logout', { method: 'POST' });
+                const res = await fetch('/api/auth/logout', { method: 'POST' });
+                if (!res.ok) throw new Error(await res.text());
             } catch (e) {
                 console.error('Logout error:', e);
+                if (demoMode) {
+                    alert(t('demo.logout_error'));
+                    return;
+                }
+            }
+            if (demoMode) {
+                endDemo(false);
+                return;
             }
             currentUser = null;
             currentPermissions = null;
@@ -1873,7 +2033,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             }
             showAuthGate('login');
             try {
-                history.replaceState({ tab: 'login' }, '', '/');
+                history.replaceState({ tab: 'login' }, '', BASE_PATH + '/');
             } catch (e) {}
         }
         window.logout = logout;
@@ -2405,9 +2565,31 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
 
         async function initApp() {
             initI18n();
+            let demoWasActive = false;
+            try {
+                const res = await fetch('/api/demo/info');
+                if (!res.ok) throw new Error(await res.text());
+                demoMode = (await res.json()).demo === true;
+            } catch (e) {
+                console.error('Demo mode detection failed:', e);
+            }
+            if (demoMode) {
+                try {
+                    demoEnded = sessionStorage.getItem('fmd_demo_ended') === '1';
+                    demoWasActive = sessionStorage.getItem('fmd_demo_active') === '1';
+                } catch (e) {}
+                const info = document.getElementById('demo-login-info');
+                if (info) info.classList.remove('hidden');
+                checkDemoSession();
+            }
             const isAuth = await checkAuthStatus();
             if (isAuth) {
+                if (demoMode) demoSetActive();
                 loadAppData();
+            } else if (demoMode) {
+                if (demoWasActive) endDemo(true);
+                else if (demoEnded) endDemo(false);
+                else pollDemoReservation();
             }
         }
 

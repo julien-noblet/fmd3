@@ -33,6 +33,20 @@
     "invalid_credentials": "Identifiant ou mot de passe incorrect.",
     "server_unreachable": "Impossible de joindre le serveur."
   },
+  "demo": {
+    "title": "Mode démo",
+    "explanation": "Découvrez l’application. Les téléchargements, la gestion des comptes et les jetons API sont désactivés. Vos données sont effacées à la déconnexion ou après 20 minutes sans interaction.",
+    "continue": "Continuer",
+    "available": "Un compte démo vous est réservé.",
+    "credentials": "Identifiant : {username} — Mot de passe : {password}",
+    "waiting": "Tous les comptes démo sont occupés. Votre position dans la file : {position}.",
+    "unavailable": "La démo est indisponible. Nouvelle tentative prochainement.",
+    "expired": "Votre session démo a expiré et ses données ont été effacées.",
+    "ended": "Votre session démo est terminée et ses données ont été effacées.",
+    "restart": "Recommencer la démo",
+    "github": "Voir le projet sur GitHub",
+    "logout_error": "Impossible de terminer la session démo. Veuillez réessayer."
+  },
   "stats": {
     "favorites": "Séries Suivies (Favoris)",
     "catalog": "Catalogue Indexé (FTS5)",
