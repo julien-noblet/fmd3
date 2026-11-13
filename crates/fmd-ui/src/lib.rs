@@ -19,7 +19,8 @@ pub fn render_app_html() -> String {
 }
 
 pub fn render_app_html_with_base_path(base_path: &str) -> String {
-    let body = (view! { <App base_path=base_path.to_string() /> }).to_html();
+    let owner = Owner::new();
+    let body = owner.with(|| (view! { <App base_path=base_path.to_string() /> }).to_html());
     let locales_js = get_locales_js();
     let script = client_script::render(base_path);
 
@@ -170,6 +171,18 @@ process.stdin.on('end', async () => {
                 "CLIENT_SCRIPT has JavaScript execution/runtime errors:\n{}",
                 stderr
             );
+        }
+    }
+
+    #[test]
+    fn test_render_app_html_logo_base_paths() {
+        for base_path in ["/reader", "/other", ""] {
+            let html = render_app_html_with_base_path(base_path);
+            let logo_src = format!("src=\"{base_path}/logo.png\"");
+            assert_eq!(html.matches(&logo_src).count(), 3);
+            if !base_path.is_empty() {
+                assert!(!html.contains("src=\"/logo.png\""));
+            }
         }
     }
 
