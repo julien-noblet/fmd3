@@ -10,7 +10,9 @@ use crate::views::users::UsersView;
 use leptos::prelude::*;
 
 #[component]
-pub fn App() -> impl IntoView {
+pub fn App(#[prop(optional)] base_path: String) -> impl IntoView {
+    provide_context(base_path.clone());
+    let logo_url = format!("{base_path}/logo.png");
     view! {
         <div class="bg-zinc-950 text-zinc-100 min-h-screen font-sans selection:bg-red-600 selection:text-white">
             // Dedicated Full-Screen Authentication Gate (Setup Wizard / Login)
@@ -23,7 +25,7 @@ pub fn App() -> impl IntoView {
                 // Screen: Initial Setup Wizard
                 <div id="screen-setup-wizard" class="hidden w-full max-w-md bg-zinc-900 border border-red-600/40 rounded-3xl p-8 shadow-2xl space-y-6">
                     <div class="text-center space-y-2">
-                        <img src="/logo.png" alt="FMD3 San" class="w-20 h-20 rounded-2xl mx-auto shadow-xl shadow-red-600/30 object-contain border border-zinc-800" />
+                        <img src=logo_url.clone() alt="FMD3 San" class="w-20 h-20 rounded-2xl mx-auto shadow-xl shadow-red-600/30 object-contain border border-zinc-800" />
                         <h2 class="text-2xl font-black text-white" data-i18n="auth.setup_title">"Initialisation de FMD3 San (三)"</h2>
                         <p class="text-xs text-zinc-400" data-i18n="auth.setup_desc">
                             "Welcome! No administrator account detected. Please create the initial admin account to secure and configure FMD3 San."
@@ -57,7 +59,7 @@ pub fn App() -> impl IntoView {
                 // Screen: Login
                 <div id="screen-login" class="hidden w-full max-w-sm bg-zinc-900 border border-zinc-800 rounded-3xl p-8 shadow-2xl space-y-6">
                     <div class="text-center space-y-2">
-                        <img src="/logo.png" alt="FMD3 San" class="w-16 h-16 rounded-2xl mx-auto shadow-lg shadow-red-600/30 object-contain border border-zinc-800" />
+                        <img src=logo_url alt="FMD3 San" class="w-16 h-16 rounded-2xl mx-auto shadow-lg shadow-red-600/30 object-contain border border-zinc-800" />
                         <h2 class="text-2xl font-black text-white" data-i18n="auth.login_title">"Connexion à FMD3 San (三)"</h2>
                         <p class="text-xs text-zinc-400" data-i18n="auth.login_desc">
                             "Access your manga library and download queue."

@@ -11,6 +11,7 @@ image:
 server:
   replicaCount: 1
   port: 8088
+  basePath: ""
   resources:
     limits:
       cpu: "1000m"

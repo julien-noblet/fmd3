@@ -1513,12 +1513,12 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
 
         function proxyCover(url) {
             if (!url) return '';
-            return '/api/proxy/image?url=' + encodeURIComponent(url);
+            return BASE_PATH + '/api/proxy/image?url=' + encodeURIComponent(url);
         }
 
         function connectWs() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+            ws = new WebSocket(`${protocol}//${window.location.host}${BASE_PATH}/api/ws`);
 
             ws.onopen = () => {
                 const badge = document.getElementById('ws-badge');
@@ -1632,8 +1632,16 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         // ==========================================
 
         // Global fetch interceptor to catch 401 Unauthorized responses
+        function withBasePath(url) {
+            if (BASE_PATH && typeof url === 'string' && url.startsWith('/') && !url.startsWith('//')) {
+                return BASE_PATH + url;
+            }
+            return url;
+        }
+
         const originalFetch = window.fetch;
         window.fetch = async function(...args) {
+            args[0] = withBasePath(args[0]);
             const response = await originalFetch.apply(this, args);
             if (response.status === 401) {
                 const url = (args[0] && args[0].url) || (typeof args[0] === 'string' ? args[0] : '');
@@ -2405,3 +2413,11 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
 
         initApp();
 "#;
+
+pub fn render(base_path: &str) -> String {
+    format!(
+        "const BASE_PATH = {};\n{}",
+        serde_json::to_string(base_path).expect("serializing a string cannot fail"),
+        CLIENT_SCRIPT
+    )
+}

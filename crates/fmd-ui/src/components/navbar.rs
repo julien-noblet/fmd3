@@ -2,11 +2,13 @@ use leptos::prelude::*;
 
 #[component]
 pub fn Navbar() -> impl IntoView {
+    let base_path = use_context::<String>().unwrap_or_default();
+    let logo_url = format!("{base_path}/logo.png");
     view! {
         <header class="bg-zinc-900 border-b border-zinc-800 sticky top-0 z-50">
             <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between gap-4">
                 <div class="flex items-center space-x-3 cursor-pointer shrink-0" onclick="switchTab('favorites')">
-                    <img src="/logo.png" alt="FMD3 San" class="w-10 h-10 rounded-xl object-contain shadow-lg shadow-red-600/20 border border-zinc-800" />
+                    <img src=logo_url alt="FMD3 San" class="w-10 h-10 rounded-xl object-contain shadow-lg shadow-red-600/20 border border-zinc-800" />
                     <div class="whitespace-nowrap">
                         <h1 class="font-bold text-lg leading-none tracking-wide text-white">
                             "FMD3"
