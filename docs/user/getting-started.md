@@ -40,6 +40,8 @@ Open your browser and navigate to **http://localhost:8088**.
 
 To serve FMD3 below a URL prefix, set the optional `BASE_PATH` environment variable to a path such as `/reader`. Path-only values with or without leading/trailing slashes are normalized; full URLs, queries, and fragments are rejected. The server generates prefixed UI asset, API, and WebSocket URLs, and accepts both prefixed requests and requests whose ingress has stripped the prefix. If unset or empty, the app is served from `/`.
 
+When a request path begins with the configured prefix on a segment boundary, the server treats it as prefixed. If the prefix overlaps an application route (for example, `/api`), ingress-stripped requests to that route are ambiguous; use a non-overlapping prefix such as `/reader` when the ingress strips it.
+
 ---
 
 ## 2. Kubernetes Deployment with Helm

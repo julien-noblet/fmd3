@@ -976,7 +976,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             async move { Html(html.to_string()) }
         }))
         .with_state(state);
-    let app = with_base_path(app, &base_path, index_html)
+    let app = with_base_path(app, &base_path)
         .layer(axum::middleware::from_fn(add_security_headers))
         .layer(cors);
 
@@ -986,22 +986,44 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn with_base_path(app: Router, base_path: &str, index_html: Arc<str>) -> Router {
+fn with_base_path(app: Router, base_path: &str) -> Router {
     if base_path.is_empty() {
         app
     } else {
-        let trailing_html = index_html;
         Router::new()
-            .route(
-                &format!("{base_path}/"),
-                get(move || {
-                    let html = trailing_html.clone();
-                    async move { Html(html.to_string()) }
-                }),
-            )
-            .nest(base_path, app.clone())
-            .merge(app)
+            .fallback_service(app)
+            .layer(axum::middleware::from_fn_with_state(
+                base_path.to_owned(),
+                strip_base_path,
+            ))
     }
+}
+
+async fn strip_base_path(
+    State(base_path): State<String>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let uri = req.uri();
+    if let Some(rest) = uri.path().strip_prefix(&base_path) {
+        if rest.is_empty() || rest.starts_with('/') {
+            let path = if rest.is_empty() { "/" } else { rest };
+            let path_and_query = match uri.query() {
+                Some(query) => format!("{path}?{query}"),
+                None => path.to_owned(),
+            };
+            let mut parts = uri.clone().into_parts();
+            parts.path_and_query = match path_and_query.parse() {
+                Ok(path_and_query) => Some(path_and_query),
+                Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+            };
+            *req.uri_mut() = match axum::http::Uri::from_parts(parts) {
+                Ok(uri) => uri,
+                Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+            };
+        }
+    }
+    next.run(req).await
 }
 
 async fn add_security_headers(
@@ -2503,7 +2525,7 @@ mod tests {
         let app = Router::new()
             .route("/", get(|| async { "index" }))
             .route("/api/health", get(|| async { "OK" }));
-        let app = with_base_path(app, "/reader", Arc::from("index"));
+        let app = with_base_path(app, "/reader");
 
         for uri in ["/reader/", "/reader/api/health", "/api/health", "/"] {
             let response = app
@@ -2516,9 +2538,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_base_paths_dispatch_prefixed_and_unprefixed_requests() {
+        for prefix in ["/api/health", "/logo.png"] {
+            let app = Router::new()
+                .route("/", get(|| async { "index" }))
+                .route("/api/health", get(|| async { "health" }))
+                .route("/logo.png", get(|| async { "logo" }))
+                .route(
+                    "/item/{id}",
+                    axum::routing::post(|AxumPath(id): AxumPath<String>| async move { id }),
+                )
+                .route(
+                    "/query",
+                    get(|uri: axum::http::Uri| async move {
+                        uri.query().unwrap_or_default().to_owned()
+                    }),
+                )
+                .fallback(get(|| async { "fallback" }));
+            let app = with_base_path(app, prefix);
+            for (uri, expected) in [
+                (prefix.to_string(), "index"),
+                (format!("{prefix}/"), "index"),
+                (format!("{prefix}/api/health?check=1"), "health"),
+                (format!("{prefix}/logo.png"), "logo"),
+                (format!("{prefix}/query?check=1"), "check=1"),
+                ("/query?check=2".to_string(), "check=2"),
+                (format!("{prefix}suffix"), "fallback"),
+                ("/".to_string(), "index"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "request to {uri}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(&body[..], expected.as_bytes(), "request to {uri}");
+            }
+            let uri = format!("{prefix}/item/123");
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "request to {uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"123");
+        }
+    }
+
+    #[tokio::test]
     async fn empty_base_path_keeps_root_routes() {
         let app = Router::new().route("/api/health", get(|| async { "OK" }));
-        let response = with_base_path(app, "", Arc::from("index"))
+        let response = with_base_path(app, "")
             .oneshot(
                 Request::builder()
                     .uri("/api/health")
