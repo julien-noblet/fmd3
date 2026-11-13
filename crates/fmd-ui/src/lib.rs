@@ -15,8 +15,13 @@ use leptos::tachys::view::RenderHtml;
 
 /// Render full HTML single-page application via Leptos SSR
 pub fn render_app_html() -> String {
-    let body = (view! { <App /> }).to_html();
+    render_app_html_with_base_path("")
+}
+
+pub fn render_app_html_with_base_path(base_path: &str) -> String {
+    let body = (view! { <App base_path=base_path.to_string() /> }).to_html();
     let locales_js = get_locales_js();
+    let script = client_script::render(base_path);
 
     format!(
         r#"<!DOCTYPE html>
@@ -25,10 +30,10 @@ pub fn render_app_html() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/x-icon" href="{base_path}/favicon.ico">
+    <link rel="icon" type="image/png" sizes="32x32" href="{base_path}/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="{base_path}/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="{base_path}/apple-touch-icon.png">
     <title>FMD3 — Free Manga Downloader San (三)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -59,7 +64,8 @@ pub fn render_app_html() -> String {
 </html>"#,
         body = body,
         locales_js = locales_js,
-        script = CLIENT_SCRIPT
+        base_path = base_path,
+        script = script
     )
 }
 
@@ -72,6 +78,9 @@ mod tests {
         let html = render_app_html();
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("FMD3"));
+        assert!(html.contains("href=\"/favicon.ico\""));
+        assert!(html.contains("src=\"/logo.png\""));
+        assert!(html.contains("const BASE_PATH = \"\";"));
         assert!(html.contains("id=\"tab-favorites\""));
         assert!(html.contains("id=\"tab-catalog\""));
         assert!(html.contains("id=\"tab-search\""));
@@ -130,6 +139,9 @@ process.stdin.on('end', async () => {
     try {
         vm.createContext(sandbox);
         vm.runInContext(code, sandbox);
+        if (sandbox.withBasePath('/api/health') !== '/reader/api/health') {
+            throw new Error('API URLs should include BASE_PATH');
+        }
         if (sandbox.logout) {
             await sandbox.logout();
         }
@@ -148,7 +160,7 @@ process.stdin.on('end', async () => {
             use std::io::Write;
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
-                    .write_all(client_script::CLIENT_SCRIPT.as_bytes())
+                    .write_all(client_script::render("/reader").as_bytes())
                     .unwrap();
             }
             let output = child.wait_with_output().unwrap();

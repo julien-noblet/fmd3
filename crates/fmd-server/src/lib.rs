@@ -1,3 +1,4 @@
+mod base_path;
 pub mod ui;
 
 use axum::{
@@ -290,6 +291,7 @@ async fn handle_download_failure(
 }
 
 pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
+    let base_path = base_path::from_env()?;
     let db = Database::new("data/fmd.db").await?;
 
     // Auto-bootstrap admin user if credentials provided via env or k8s secret
@@ -834,8 +836,17 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             axum::http::HeaderName::from_static("x-fmd-internal-token"),
         ]);
 
+    let index_html = Arc::<str>::from(ui::render_index_html(&base_path));
+    let root_index_html = index_html.clone();
+    let fallback_index_html = index_html.clone();
     let app = Router::new()
-        .route("/", get(|| async { Html(ui::index_html()) }))
+        .route(
+            "/",
+            get(move || {
+                let html = root_index_html.clone();
+                async move { Html(html.to_string()) }
+            }),
+        )
         .route(
             "/logo.png",
             get(|| async {
@@ -960,15 +971,37 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         .route("/api/internal/tasks/progress", post(internal_task_progress))
         .route("/api/internal/tasks/complete", post(internal_task_complete))
         .route("/api/ws", get(ws_handler))
-        .fallback(get(|| async { Html(ui::index_html()) }))
-        .layer(axum::middleware::from_fn(add_security_headers))
-        .layer(cors)
+        .fallback(get(move || {
+            let html = fallback_index_html.clone();
+            async move { Html(html.to_string()) }
+        }))
         .with_state(state);
+    let app = with_base_path(app, &base_path, index_html)
+        .layer(axum::middleware::from_fn(add_security_headers))
+        .layer(cors);
 
     info!("Starting FMD3 San (三) Daemon on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn with_base_path(app: Router, base_path: &str, index_html: Arc<str>) -> Router {
+    if base_path.is_empty() {
+        app
+    } else {
+        let trailing_html = index_html;
+        Router::new()
+            .route(
+                &format!("{base_path}/"),
+                get(move || {
+                    let html = trailing_html.clone();
+                    async move { Html(html.to_string()) }
+                }),
+            )
+            .nest(base_path, app.clone())
+            .merge(app)
+    }
 }
 
 async fn add_security_headers(
@@ -2456,6 +2489,47 @@ async fn update_settings_handler(
 
 #[cfg(test)]
 mod tests {
+    use super::with_base_path;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn accepts_prefixed_and_prefix_stripped_routes() {
+        let app = Router::new()
+            .route("/", get(|| async { "index" }))
+            .route("/api/health", get(|| async { "OK" }));
+        let app = with_base_path(app, "/reader", Arc::from("index"));
+
+        for uri in ["/reader/", "/reader/api/health", "/api/health", "/"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "request to {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_base_path_keeps_root_routes() {
+        let app = Router::new().route("/api/health", get(|| async { "OK" }));
+        let response = with_base_path(app, "", Arc::from("index"))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     use super::*;
 
     #[tokio::test]

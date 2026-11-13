@@ -38,6 +38,8 @@ docker compose up -d
 
 Open your browser and navigate to **http://localhost:8088**.
 
+To serve FMD3 below a URL prefix, set the optional `BASE_PATH` environment variable to a path such as `/reader`. Path-only values with or without leading/trailing slashes are normalized; full URLs, queries, and fragments are rejected. The server generates prefixed UI asset, API, and WebSocket URLs, and accepts both prefixed requests and requests whose ingress has stripped the prefix. If unset or empty, the app is served from `/`.
+
 ---
 
 ## 2. Kubernetes Deployment with Helm
@@ -62,6 +64,8 @@ helm upgrade --install fmd3 ./charts/fmd3 \
   --set worker.enabled=true \
   --set worker.replicaCount=3
 ```
+
+For Helm deployments, set `server.basePath` to the same path prefix configured on the ingress, for example `--set server.basePath=/reader`. The ingress may forward the prefix unchanged or strip it before forwarding.
 
 ---
 
