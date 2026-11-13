@@ -75,6 +75,179 @@ mod tests {
     use super::*;
 
     #[test]
+    fn catalog_sync_cannot_be_cancelled_in_demo_or_cleared_on_failure() {
+        let Ok(mut child) = std::process::Command::new("node")
+            .arg("-e")
+            .arg(
+                r#"
+const vm = require('vm');
+let code = '';
+process.stdin.on('data', d => code += d);
+process.stdin.on('end', async () => {
+    const requests = [];
+    const elements = new Map();
+    const classes = new Set();
+    elements.set('btn-sync-catalog', {
+        disabled: false,
+        className: '',
+        classList: {
+            add: (...names) => names.forEach(name => classes.add(name)),
+            remove: (...names) => names.forEach(name => classes.delete(name)),
+            toggle: (name, force) => force ? classes.add(name) : classes.delete(name)
+        }
+    });
+    elements.set('sync-icon', { textContent: '' });
+    elements.set('sync-label', { textContent: '' });
+    const sandbox = {
+        document: { getElementById: id => elements.get(id) || null, querySelectorAll: () => [], documentElement: {} },
+        navigator: { language: 'en' },
+        localStorage: { getItem: () => null, setItem: () => {} },
+        sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        fetch: async url => {
+            requests.push(url);
+            if (url === '/api/demo/info') return { status: 200, ok: true, json: async () => ({ demo: false }) };
+            if (url === '/api/auth/status') return { status: 200, ok: true, json: async () => ({ authenticated: false }) };
+            return { status: 403, ok: false, text: async () => 'Unavailable', json: async () => ({ demo: false }) };
+        },
+        console, alert: () => {}, setTimeout: () => {}, clearTimeout: () => {},
+        history: { replaceState: () => {}, pushState: () => {} },
+        addEventListener: () => {},
+        location: { protocol: 'http:', host: 'localhost', hash: '' },
+        LOCALES: { en: {} }, LANGUAGES: []
+    };
+    sandbox.window = sandbox;
+    try {
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox);
+        await new Promise(resolve => setImmediate(resolve));
+        vm.runInContext("demoMode = true; activeSyncInfo = {module_id: 'test'}; updateSyncButton();", sandbox);
+        if (!classes.has('hidden')) throw new Error('demo sync button is visible');
+        await sandbox.toggleCatalogSync();
+        if (requests.includes('/api/catalog/sync/cancel')) throw new Error('demo mode sent a cancellation request');
+        vm.runInContext("activeSyncInfo = null; catalogModule = 'test';", sandbox);
+        await sandbox.toggleCatalogSync();
+        if (requests.some(url => url.startsWith('/api/catalog/sync/'))) throw new Error('demo mode started a catalog sync');
+
+        vm.runInContext("demoMode = false; activeSyncInfo = {module_id: 'test'}; bannerCleared = false; updateSyncBanner = () => { bannerCleared = true };", sandbox);
+        await sandbox.toggleCatalogSync();
+        if (vm.runInContext('activeSyncInfo', sandbox) === null) throw new Error('failed cancellation cleared active sync state');
+        if (vm.runInContext('bannerCleared', sandbox)) throw new Error('failed cancellation cleared the active banner');
+        if (requests.filter(url => url === '/api/catalog/sync/cancel').length !== 1) {
+            throw new Error('expected one cancellation attempt outside demo mode');
+        }
+    } catch (e) {
+        console.error(e);
+        process.exitCode = 1;
+    }
+});
+"#,
+            )
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(client_script::render("").as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "Catalog sync cancellation regression failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn restored_demo_session_reenables_activity_and_expiry_checks() {
+        let Ok(mut child) = std::process::Command::new("node")
+            .arg("-e")
+            .arg(
+                r#"
+const vm = require('vm');
+let code = '';
+process.stdin.on('data', d => code += d);
+process.stdin.on('end', async () => {
+    const storage = new Map([['fmd_demo_ended', '1']]);
+    const requests = [];
+    let authenticated = true;
+    const sandbox = {
+        document: { getElementById: () => null, querySelectorAll: () => [], documentElement: {} },
+        navigator: { language: 'en' },
+        localStorage: { getItem: () => null, setItem: () => {} },
+        sessionStorage: {
+            getItem: key => storage.get(key) ?? null,
+            setItem: (key, value) => storage.set(key, value),
+            removeItem: key => storage.delete(key)
+        },
+        fetch: async url => {
+            requests.push(url);
+            const data = url === '/api/demo/info' ? { demo: true }
+                : url === '/api/auth/status' ? { authenticated, user: authenticated ? { username: 'demo', role: 'user' } : null, permissions: {} }
+                : {};
+            return { status: 200, ok: true, json: async () => data };
+        },
+        console, setTimeout: () => {}, clearTimeout: () => {},
+        history: { replaceState: () => {}, pushState: () => {} },
+        addEventListener: () => {},
+        location: { protocol: 'http:', host: 'localhost', hash: '' },
+        LOCALES: { en: {} }, LANGUAGES: []
+    };
+    sandbox.window = sandbox;
+    try {
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox);
+        vm.runInContext('loadAppData = () => {}', sandbox);
+        await new Promise(resolve => setImmediate(resolve));
+        if (storage.get('fmd_demo_ended') !== '0' || storage.get('fmd_demo_active') !== '1') {
+            throw new Error('restored demo remains ended or is not marked active');
+        }
+        await sandbox.demoActivity({ isTrusted: true });
+        if (!requests.includes('/api/demo/activity')) throw new Error('activity update was suppressed');
+        const checks = requests.filter(url => url === '/api/auth/status').length;
+        await sandbox.checkDemoSession();
+        if (requests.filter(url => url === '/api/auth/status').length !== checks + 1) {
+            throw new Error('expiry check was suppressed');
+        }
+        authenticated = false;
+        await sandbox.checkDemoSession();
+        if (storage.get('fmd_demo_ended') !== '1' || storage.has('fmd_demo_active')) {
+            throw new Error('expired restored session was not marked ended');
+        }
+    } catch (e) {
+        console.error(e);
+        process.exitCode = 1;
+    }
+});
+"#,
+            )
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(client_script::render("").as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "Demo session restoration failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn test_render_app_html_output() {
         let html = render_app_html();
         assert!(html.contains("<!DOCTYPE html>"));

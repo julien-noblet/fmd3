@@ -38,6 +38,7 @@ pub struct AppState {
     pub engine: Arc<Mutex<LuaModuleEngine>>,
     pub modules: Arc<Vec<WebsiteModule>>,
     pub ws_sender: broadcast::Sender<WsNotification>,
+    pub catalog_ws_sender: Option<broadcast::Sender<WsNotification>>,
     pub sync_manager: Arc<CatalogSyncManager>,
     pub nats_context: Option<async_nats::jetstream::Context>,
     pub throttler: auth::DomainThrottler,
@@ -55,6 +56,15 @@ impl AppState {
 pub struct WsNotification {
     pub event: String,
     pub payload: serde_json::Value,
+}
+
+pub(crate) fn send_catalog_notification(
+    private_ws: &broadcast::Sender<WsNotification>,
+    catalog_ws: Option<&broadcast::Sender<WsNotification>>,
+    notification: WsNotification,
+) {
+    let sender = catalog_ws.unwrap_or(private_ws);
+    let _ = sender.send(notification);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +118,7 @@ impl CatalogSyncManager {
         engine: Arc<Mutex<LuaModuleEngine>>,
         db: Database,
         ws: broadcast::Sender<WsNotification>,
+        catalog_ws: Option<broadcast::Sender<WsNotification>>,
     ) {
         let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -132,16 +143,21 @@ impl CatalogSyncManager {
         let _ = db
             .set_module_sync_status(&module.id, "Syncing", None, None)
             .await;
-        let _ = ws.send(WsNotification {
-            event: "catalog_sync_started".into(),
-            payload: serde_json::json!({ "module_id": &module.id, "module_name": &module.name }),
-        });
+        send_catalog_notification(
+            &ws,
+            catalog_ws.as_ref(),
+            WsNotification {
+                event: "catalog_sync_started".into(),
+                payload: serde_json::json!({ "module_id": &module.id, "module_name": &module.name }),
+            },
+        );
 
         let file_path = module.file_path.clone();
         let cancel_clone = cancel_token.clone();
         let engine_clone = engine.clone();
         let db_clone = db.clone();
         let ws_clone = ws.clone();
+        let catalog_ws_clone = catalog_ws.clone();
         let mod_id = module.id.clone();
         let mod_name = module.name.clone();
         let sm_clone = self.clone();
@@ -155,6 +171,7 @@ impl CatalogSyncManager {
 
                 let db_c = db_clone.clone();
                 let ws_c = ws_clone.clone();
+                let catalog_ws_c = catalog_ws_clone.clone();
                 let sm_c = sm_clone.clone();
                 let m_id = mod_id.clone();
                 let m_name = mod_name.clone();
@@ -170,18 +187,22 @@ impl CatalogSyncManager {
                             inf.items_found = progress.items_found;
                         }
                     }
-                    let _ = ws_c.send(WsNotification {
-                        event: "catalog_sync_progress".into(),
-                        payload: serde_json::json!({
-                            "module_id": m_id,
-                            "module_name": m_name,
-                            "directory_index": progress.directory_index,
-                            "total_directories": progress.total_directories,
-                            "current_page": progress.current_page,
-                            "total_pages": progress.total_pages,
-                            "items_found": progress.items_found,
-                        }),
-                    });
+                    send_catalog_notification(
+                        &ws_c,
+                        catalog_ws_c.as_ref(),
+                        WsNotification {
+                            event: "catalog_sync_progress".into(),
+                            payload: serde_json::json!({
+                                "module_id": m_id,
+                                "module_name": m_name,
+                                "directory_index": progress.directory_index,
+                                "total_directories": progress.total_directories,
+                                "current_page": progress.current_page,
+                                "total_pages": progress.total_pages,
+                                "items_found": progress.items_found,
+                            }),
+                        },
+                    );
                 });
 
                 Ok(())
@@ -194,10 +215,14 @@ impl CatalogSyncManager {
                 let _ = db
                     .set_module_sync_status(&module.id, "Completed", None, Some(total as i64))
                     .await;
-                let _ = ws.send(WsNotification {
-                    event: "catalog_sync_completed".into(),
-                    payload: serde_json::json!({ "module_id": &module.id, "total_mangas": total }),
-                });
+                send_catalog_notification(
+                    &ws,
+                    catalog_ws.as_ref(),
+                    WsNotification {
+                        event: "catalog_sync_completed".into(),
+                        payload: serde_json::json!({ "module_id": &module.id, "total_mangas": total }),
+                    },
+                );
             }
             Ok(Err(e)) => {
                 let is_cancelled = cancel_token.load(std::sync::atomic::Ordering::Relaxed);
@@ -206,20 +231,28 @@ impl CatalogSyncManager {
                 let _ = db
                     .set_module_sync_status(&module.id, status, Some(&err_msg), None)
                     .await;
-                let _ = ws.send(WsNotification {
-                    event: "catalog_sync_failed".into(),
-                    payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
-                });
+                send_catalog_notification(
+                    &ws,
+                    catalog_ws.as_ref(),
+                    WsNotification {
+                        event: "catalog_sync_failed".into(),
+                        payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
+                    },
+                );
             }
             Err(e) => {
                 let err_msg = format!("Task error: {}", e);
                 let _ = db
                     .set_module_sync_status(&module.id, "Failed", Some(&err_msg), None)
                     .await;
-                let _ = ws.send(WsNotification {
-                    event: "catalog_sync_failed".into(),
-                    payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
-                });
+                send_catalog_notification(
+                    &ws,
+                    catalog_ws.as_ref(),
+                    WsNotification {
+                        event: "catalog_sync_failed".into(),
+                        payload: serde_json::json!({ "module_id": &module.id, "error": err_msg }),
+                    },
+                );
             }
         }
 
@@ -372,6 +405,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         engine,
         modules: Arc::new(modules),
         ws_sender: ws_sender.clone(),
+        catalog_ws_sender: None,
         sync_manager,
         nats_context,
         throttler,
@@ -428,6 +462,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                                             bg_state.engine.clone(),
                                             bg_state.db.clone(),
                                             bg_state.ws_sender.clone(),
+                                            bg_state.catalog_ws_sender.clone(),
                                         )
                                         .await;
                                     break; // Only one sync at a time
@@ -1882,6 +1917,10 @@ async fn ws_handler(
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut rx = state.ws_sender.subscribe();
+    let mut catalog_rx = state
+        .catalog_ws_sender
+        .as_ref()
+        .map(broadcast::Sender::subscribe);
     let mut shutdown = state.demo_shutdown.clone();
 
     // Welcome message
@@ -1912,6 +1951,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
             Ok(notif) = rx.recv() => {
+                if let Ok(json_str) = serde_json::to_string(&notif) {
+                    if socket.send(Message::Text(json_str.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Some(Ok(notif)) = async {
+                match &mut catalog_rx {
+                    Some(receiver) => Some(receiver.recv().await),
+                    None => std::future::pending::<Option<Result<WsNotification, broadcast::error::RecvError>>>().await,
+                }
+            } => {
                 if let Ok(json_str) = serde_json::to_string(&notif) {
                     if socket.send(Message::Text(json_str.into())).await.is_err() {
                         break;
@@ -2437,9 +2488,10 @@ async fn trigger_catalog_sync(
     let engine = state.engine.clone();
     let db = state.cache_db().clone();
     let ws = state.ws_sender.clone();
+    let catalog_ws = state.catalog_ws_sender.clone();
 
     tokio::spawn(async move {
-        sm.run_sync(module, engine, db, ws).await;
+        sm.run_sync(module, engine, db, ws, catalog_ws).await;
     });
 
     Ok(Json(serde_json::json!({
@@ -2688,6 +2740,7 @@ mod tests {
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
+            catalog_ws_sender: None,
             sync_manager,
             nats_context: None,
             throttler: auth::DomainThrottler::new(),
@@ -2890,6 +2943,7 @@ mod tests {
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
+            catalog_ws_sender: None,
             sync_manager,
             nats_context: None,
             throttler: auth::DomainThrottler::new(),
@@ -2970,6 +3024,7 @@ mod tests {
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
+            catalog_ws_sender: None,
             sync_manager,
             nats_context: None,
             throttler: auth::DomainThrottler::new(),

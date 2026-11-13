@@ -32,6 +32,11 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             } catch (e) {}
         }
 
+        function demoSetActive() {
+            demoSetEnded(false);
+            try { sessionStorage.setItem('fmd_demo_active', '1'); } catch (e) {}
+        }
+
         function demoMessage(key, params) {
             const el = document.getElementById('demo-status');
             if (el) el.textContent = t(key, params);
@@ -39,6 +44,8 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
 
         function endDemo(expired) {
             demoSetEnded(true);
+            const dialog = document.getElementById('demo-dialog');
+            if (dialog && dialog.open) dialog.close();
             currentUser = null;
             currentPermissions = null;
             if (ws) {
@@ -712,13 +719,16 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             const icon = document.getElementById('sync-icon');
             const label = document.getElementById('sync-label');
             if (!btn || !icon || !label) return;
+            btn.classList.toggle('hidden', demoMode);
+            if (demoMode) return;
 
             if (activeSyncInfo) {
                 btn.className = "px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg text-sm transition flex items-center gap-2 shadow-lg shadow-amber-600/20";
-                icon.textContent = "⏹️";
-                label.textContent = t("catalog.sync_stop");
-                btn.disabled = false;
-                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                icon.textContent = demoMode ? "🔄" : "⏹️";
+                label.textContent = t(demoMode ? "catalog.syncing" : "catalog.sync_stop");
+                btn.disabled = demoMode;
+                btn.classList.toggle('opacity-50', demoMode);
+                btn.classList.toggle('cursor-not-allowed', demoMode);
                 return;
             }
 
@@ -777,9 +787,11 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         }
 
         async function toggleCatalogSync() {
+            if (demoMode) return;
             if (activeSyncInfo) {
                 try {
-                    await fetch('/api/catalog/sync/cancel', { method: 'POST' });
+                    const response = await fetch('/api/catalog/sync/cancel', { method: 'POST' });
+                    if (!response.ok) throw new Error(await response.text());
                     activeSyncInfo = null;
                     updateSyncBanner(null);
                     updateSyncButton();
@@ -1879,6 +1891,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 if (data.authenticated && data.user) {
                     currentUser = data.user;
                     currentPermissions = data.permissions;
+                    if (demoMode) demoSetActive();
                     showMainApp(data.user);
                     return true;
                 } else {
@@ -1964,9 +1977,12 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 showMainApp(data.user);
                 if (demoMode) {
                     demoLastActivity = 0;
-                    try { sessionStorage.setItem('fmd_demo_active', '1'); } catch (e) {}
+                    demoSetActive();
                     const dialog = document.getElementById('demo-dialog');
-                    if (dialog) dialog.classList.remove('hidden');
+                    if (dialog && !dialog.open) {
+                        document.getElementById('tab-btn-favorites')?.focus();
+                        dialog.showModal();
+                    }
                 }
                 loadAppData();
             } catch (e) {
@@ -2558,6 +2574,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             }
             const isAuth = await checkAuthStatus();
             if (isAuth) {
+                if (demoMode) demoSetActive();
                 loadAppData();
             } else if (demoMode) {
                 if (demoWasActive) endDemo(true);

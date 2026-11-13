@@ -94,13 +94,13 @@ pub fn App(#[prop(optional)] base_path: String) -> impl IntoView {
 
             // Main Application Container (Hidden by default until authenticated)
             <div id="main-app-container" class="hidden min-h-screen flex flex-col">
-                <div id="demo-dialog" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4" role="dialog" aria-modal="true" aria-labelledby="demo-dialog-title">
-                    <div class="w-full max-w-md space-y-4 rounded-2xl border border-amber-700 bg-zinc-900 p-6 shadow-2xl">
+                <dialog id="demo-dialog" oncancel="event.preventDefault()" class="w-full max-w-md rounded-2xl border border-amber-700 bg-zinc-900 p-6 text-zinc-100 shadow-2xl backdrop:bg-black/80" aria-labelledby="demo-dialog-title" aria-describedby="demo-dialog-description">
+                    <div class="space-y-4">
                         <h2 id="demo-dialog-title" class="text-xl font-bold" data-i18n="demo.title">"Demo mode"</h2>
-                        <p class="text-sm text-zinc-300" data-i18n="demo.explanation">"Explore the application. Downloads are disabled. Your data is erased after logout or 20 minutes without interaction."</p>
-                        <button type="button" onclick="document.getElementById('demo-dialog').classList.add('hidden')" class="rounded-lg bg-red-600 px-4 py-2 text-white" data-i18n="demo.continue">"Continue"</button>
+                        <p id="demo-dialog-description" class="text-sm text-zinc-300" data-i18n="demo.explanation">"Explore the application. Downloads are disabled. Your data is erased after logout or 20 minutes without interaction."</p>
+                        <button type="button" autofocus=true onclick="document.getElementById('demo-dialog').close()" class="rounded-lg bg-red-600 px-4 py-2 text-white" data-i18n="demo.continue">"Continue"</button>
                     </div>
-                </div>
+                </dialog>
                 <Navbar />
 
                 <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
