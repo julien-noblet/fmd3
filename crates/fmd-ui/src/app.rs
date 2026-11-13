@@ -66,6 +66,12 @@ pub fn App(#[prop(optional)] base_path: String) -> impl IntoView {
                         </p>
                     </div>
 
+                    <div id="demo-login-info" class="hidden space-y-3 rounded-xl border border-amber-700 bg-amber-950/40 p-3 text-xs">
+                        <p id="demo-status" class="text-amber-200"></p>
+                        <p id="demo-credentials" class="hidden break-all text-white"></p>
+                        <button id="demo-restart" type="button" onclick="restartDemo()" class="hidden rounded-lg bg-amber-700 px-3 py-2 text-white" data-i18n="demo.restart">"Try the demo again"</button>
+                        <a href="https://github.com/julien-noblet/fmd3" target="_blank" rel="noopener noreferrer" class="block text-amber-300 underline" data-i18n="demo.github">"View the project on GitHub"</a>
+                    </div>
                     <form id="login-form" onsubmit="submitLogin(event)" class="space-y-4">
                         <div>
                             <label class="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-1.5" data-i18n="auth.login_username">"Identifiant"</label>
@@ -88,6 +94,13 @@ pub fn App(#[prop(optional)] base_path: String) -> impl IntoView {
 
             // Main Application Container (Hidden by default until authenticated)
             <div id="main-app-container" class="hidden min-h-screen flex flex-col">
+                <div id="demo-dialog" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4" role="dialog" aria-modal="true" aria-labelledby="demo-dialog-title">
+                    <div class="w-full max-w-md space-y-4 rounded-2xl border border-amber-700 bg-zinc-900 p-6 shadow-2xl">
+                        <h2 id="demo-dialog-title" class="text-xl font-bold" data-i18n="demo.title">"Demo mode"</h2>
+                        <p class="text-sm text-zinc-300" data-i18n="demo.explanation">"Explore the application. Downloads are disabled. Your data is erased after logout or 20 minutes without interaction."</p>
+                        <button type="button" onclick="document.getElementById('demo-dialog').classList.add('hidden')" class="rounded-lg bg-red-600 px-4 py-2 text-white" data-i18n="demo.continue">"Continue"</button>
+                    </div>
+                </div>
                 <Navbar />
 
                 <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">

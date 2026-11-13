@@ -33,6 +33,20 @@
     "invalid_credentials": "שם משתמש או סיסמה שגויים.",
     "server_unreachable": "לא ניתן להשיג את השרת."
   },
+  "demo": {
+    "title": "Demo mode",
+    "explanation": "Explore the application. Downloads, account management and API tokens are disabled. Your data is erased after logout or 20 minutes without interaction.",
+    "continue": "Continue",
+    "available": "A demo account is reserved for you.",
+    "credentials": "Username: {username} — Password: {password}",
+    "waiting": "All demo accounts are in use. Your position in the queue: {position}.",
+    "unavailable": "The demo is unavailable. Retrying shortly.",
+    "expired": "Your demo session expired and its data was erased.",
+    "ended": "Your demo session ended and its data was erased.",
+    "restart": "Try the demo again",
+    "github": "View the project on GitHub",
+    "logout_error": "Unable to end your demo session. Please try again."
+  },
   "stats": {
     "favorites": "מאנגה במעקב (מועדפים)",
     "catalog": "קטלוג מאונדקס (FTS5)",

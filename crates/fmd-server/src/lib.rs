@@ -17,11 +17,12 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
 pub mod auth;
+mod demo;
 
 const LOGO_PNG: &[u8] = include_bytes!("../../../images/logo-256.png");
 const FAVICON_ICO: &[u8] = include_bytes!("../../../images/favicon.ico");
@@ -32,6 +33,8 @@ const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../../images/apple-touch-icon
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    pub shared_cache: Option<Database>,
+    pub demo_shutdown: Option<watch::Receiver<bool>>,
     pub engine: Arc<Mutex<LuaModuleEngine>>,
     pub modules: Arc<Vec<WebsiteModule>>,
     pub ws_sender: broadcast::Sender<WsNotification>,
@@ -40,6 +43,12 @@ pub struct AppState {
     pub throttler: auth::DomainThrottler,
     pub login_rate_limiter: Arc<auth::LoginRateLimiter>,
     pub internal_worker_token: String,
+}
+
+impl AppState {
+    fn cache_db(&self) -> &Database {
+        self.shared_cache.as_ref().unwrap_or(&self.db)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -292,6 +301,9 @@ async fn handle_download_failure(
 
 pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     let base_path = base_path::from_env()?;
+    if let Some(config) = demo::DemoConfig::from_env()? {
+        return demo::run_server(addr, config, &base_path).await;
+    }
     let db = Database::new("data/fmd.db").await?;
 
     // Auto-bootstrap admin user if credentials provided via env or k8s secret
@@ -355,6 +367,8 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
 
     let state = AppState {
         db,
+        shared_cache: None,
+        demo_shutdown: None,
         engine,
         modules: Arc::new(modules),
         ws_sender: ws_sender.clone(),
@@ -818,6 +832,14 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         }
     }
 
+    let app = with_base_path(build_router(state, &base_path), &base_path);
+    info!("Starting FMD3 San (三) Daemon on http://{}", addr);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_router(state: AppState, base_path: &str) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
         .allow_methods([
@@ -836,7 +858,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             axum::http::HeaderName::from_static("x-fmd-internal-token"),
         ]);
 
-    let index_html = Arc::<str>::from(ui::render_index_html(&base_path));
+    let index_html = Arc::<str>::from(ui::render_index_html(base_path));
     let root_index_html = index_html.clone();
     let fallback_index_html = index_html.clone();
     let app = Router::new()
@@ -909,6 +931,10 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         )
         .route("/api/health", get(|| async { "OK" }))
         .route("/api/version", get(|| async { env!("CARGO_PKG_VERSION") }))
+        .route(
+            "/api/demo/info",
+            get(|| async { Json(serde_json::json!({"demo": false})) }),
+        )
         .route("/api/auth/status", get(auth::get_auth_status))
         .route("/api/auth/setup", post(auth::auth_setup))
         .route("/api/auth/login", post(auth::auth_login))
@@ -976,14 +1002,8 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
             async move { Html(html.to_string()) }
         }))
         .with_state(state);
-    let app = with_base_path(app, &base_path)
-        .layer(axum::middleware::from_fn(add_security_headers))
-        .layer(cors);
-
-    info!("Starting FMD3 San (三) Daemon on http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    app.layer(axum::middleware::from_fn(add_security_headers))
+        .layer(cors)
 }
 
 fn with_base_path(app: Router, base_path: &str) -> Router {
@@ -1140,7 +1160,7 @@ async fn fetch_manga_info(
 
     // 1. Check cache if not forcing refresh
     if !allow_force {
-        if let Ok(Some(cached)) = state.db.get_manga_cache(&manga_id).await {
+        if let Ok(Some(cached)) = state.cache_db().get_manga_cache(&manga_id).await {
             if !cached.is_expired() {
                 if let (Ok(mut info), Ok(chapters)) = (
                     serde_json::from_str::<MangaInfoResult>(&cached.metadata_json),
@@ -1169,7 +1189,7 @@ async fn fetch_manga_info(
 
     // 2. Fetch fresh from engine with rate limiting
     let policy = state
-        .db
+        .cache_db()
         .get_module_cache_policy(&req.module_id)
         .await
         .unwrap_or_default();
@@ -1222,7 +1242,7 @@ async fn fetch_manga_info(
                 cached_at: now,
                 expires_at,
             };
-            let _ = state.db.save_manga_cache(&cache_item).await;
+            let _ = state.cache_db().save_manga_cache(&cache_item).await;
 
             let mut val = serde_json::to_value(&info).unwrap_or_default();
             if let Some(obj) = val.as_object_mut() {
@@ -1271,7 +1291,7 @@ async fn get_alternative_sources(
     }
 
     let (items, _) = state
-        .db
+        .cache_db()
         .search_catalog(q, None, 50, 0)
         .await
         .unwrap_or_default();
@@ -1465,6 +1485,12 @@ async fn add_favorite(
     }
     let user_id = Some(ctx.user.id.as_str());
     let manga_id = format!("{}:{}", req.module_id, req.url);
+    if state.shared_cache.is_some() && req.auto_download == Some(true) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Automatic downloads are unavailable in demo mode".into(),
+        ));
+    }
     let auto_dl = req.auto_download.unwrap_or(false);
     let fmt = req.download_format.unwrap_or_else(|| "CBZ".into());
 
@@ -1617,6 +1643,12 @@ async fn update_favorite_settings(
         })?;
 
     let enabled = req.enabled.unwrap_or(current.enabled);
+    if state.shared_cache.is_some() && req.auto_download == Some(true) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Automatic downloads are unavailable in demo mode".into(),
+        ));
+    }
     let auto_download = req.auto_download.unwrap_or(current.auto_download);
     let download_format = req.download_format.unwrap_or(current.download_format);
 
@@ -1850,6 +1882,7 @@ async fn ws_handler(
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut rx = state.ws_sender.subscribe();
+    let mut shutdown = state.demo_shutdown.clone();
 
     // Welcome message
     let welcome = serde_json::json!({
@@ -1860,6 +1893,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
+            _ = async {
+                match &mut shutdown {
+                    Some(signal) => { let _ = signal.changed().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
@@ -2318,7 +2360,7 @@ async fn search_catalog(
     let offset = params.offset.unwrap_or(0).max(0);
 
     let (items, total) = state
-        .db
+        .cache_db()
         .search_catalog(&q, m_id.as_deref(), limit, offset)
         .await
         .unwrap_or_default();
@@ -2343,8 +2385,16 @@ async fn get_catalog_status(
     State(state): State<AppState>,
 ) -> Json<CatalogStatusResponse> {
     let active = state.sync_manager.get_active_info().await;
-    let modules = state.db.list_all_sync_statuses().await.unwrap_or_default();
-    let total_catalog_items = state.db.get_catalog_total_count().await.unwrap_or(0);
+    let modules = state
+        .cache_db()
+        .list_all_sync_statuses()
+        .await
+        .unwrap_or_default();
+    let total_catalog_items = state
+        .cache_db()
+        .get_catalog_total_count()
+        .await
+        .unwrap_or(0);
 
     Json(CatalogStatusResponse {
         active,
@@ -2385,7 +2435,7 @@ async fn trigger_catalog_sync(
 
     let sm = state.sync_manager.clone();
     let engine = state.engine.clone();
-    let db = state.db.clone();
+    let db = state.cache_db().clone();
     let ws = state.ws_sender.clone();
 
     tokio::spawn(async move {
@@ -2479,9 +2529,15 @@ async fn proxy_image(
 }
 
 async fn get_settings_handler(
-    _admin: auth::RequireAdmin,
+    auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
 ) -> Result<Json<fmd_core::AppSettings>, (axum::http::StatusCode, String)> {
+    if state.shared_cache.is_none() && !ctx.user.is_admin() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Privilèges administrateur requis".into(),
+        ));
+    }
     let s = state
         .db
         .get_settings()
@@ -2491,10 +2547,16 @@ async fn get_settings_handler(
 }
 
 async fn update_settings_handler(
-    _admin: auth::RequireAdmin,
+    auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
     Json(new_settings): Json<fmd_core::AppSettings>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if state.shared_cache.is_none() && !ctx.user.is_admin() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Privilèges administrateur requis".into(),
+        ));
+    }
     state
         .db
         .update_settings(&new_settings)
@@ -2621,6 +2683,8 @@ mod tests {
         let sync_manager = Arc::new(CatalogSyncManager::new());
         let state = AppState {
             db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
@@ -2821,6 +2885,8 @@ mod tests {
         let sync_manager = Arc::new(CatalogSyncManager::new());
         let state = AppState {
             db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
             engine,
             modules: Arc::new(vec![]),
             ws_sender,
@@ -2899,6 +2965,8 @@ mod tests {
         let sync_manager = Arc::new(CatalogSyncManager::new());
         let state = AppState {
             db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
             engine,
             modules: Arc::new(vec![]),
             ws_sender,

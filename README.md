@@ -65,6 +65,26 @@ nix develop
 cargo run --release --bin fmd -- serve --port 8088 --bind 0.0.0.0
 ```
 
+### Public demo mode
+
+Run a **dedicated, single server instance** with its own working directory and
+data volume:
+
+```bash
+FMD_DEMO_MODE=true DEMO_SLOTS=10 cargo run --release --bin fmd -- serve --bind 0.0.0.0:8088
+```
+
+`DEMO_SLOTS` defaults to 10 and must be a positive integer. Visitors receive
+separate temporary accounts; when all slots are occupied, new visitors join a
+FIFO queue. Accounts and their data expire after 20 minutes without interaction
+or on logout. Downloads, account management and API tokens are disabled.
+Restarting the server clears all sessions and the queue. Scraped public data and
+the catalog are shared and persist in `data/fmd-demo/public-cache.db`; never use
+this as the data directory of a normal installation. A single demo instance is
+required: multiple replicas do not share the queue or enforce a global limit.
+Do not run download workers for the demo. When publishing it, use HTTPS and a
+trusted reverse proxy that sets `X-Forwarded-Proto: https`.
+
 ---
 
 ## 💻 CLI Commands
