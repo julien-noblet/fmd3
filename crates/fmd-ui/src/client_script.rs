@@ -2558,6 +2558,10 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             }
             const isAuth = await checkAuthStatus();
             if (isAuth) {
+                if (demoMode) {
+                    demoSetEnded(false);
+                    try { sessionStorage.setItem('fmd_demo_active', '1'); } catch (e) {}
+                }
                 loadAppData();
             } else if (demoMode) {
                 if (demoWasActive) endDemo(true);
