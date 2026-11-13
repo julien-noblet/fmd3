@@ -16,9 +16,7 @@ use tokio::time::Instant;
 use tower::ServiceExt;
 use tracing::{info, warn};
 
-use crate::{
-    auth, build_router, send_catalog_notification, AppState, CatalogSyncManager, WsNotification,
-};
+use crate::{auth, build_router, AppState, CatalogSyncManager};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -38,7 +36,8 @@ struct Slot {
     password: String,
     logged_in: bool,
     db: Database,
-    ws_sender: broadcast::Sender<WsNotification>,
+    #[cfg(test)]
+    ws_sender: broadcast::Sender<crate::WsNotification>,
     app: Router,
     shutdown: watch::Sender<bool>,
     login_lock: Arc<Mutex<()>>,
@@ -114,6 +113,7 @@ impl Manager {
                 password,
                 logged_in: false,
                 db,
+                #[cfg(test)]
                 ws_sender: sender,
                 app,
                 shutdown,
@@ -585,6 +585,7 @@ impl DemoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{send_catalog_notification, WsNotification};
     use axum::{
         body::{to_bytes, Body},
         http::Request,
@@ -901,9 +902,9 @@ mod tests {
     async fn stalled_login_body_does_not_lock_manager_and_expired_slot_is_rejected() {
         let manager = manager(2).await;
         let (cookie, credentials) = reserve(&manager, None).await;
-        let (body_tx, mut body_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
+        let (body_tx, body_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
         let (body_started_tx, body_started_rx) = tokio::sync::oneshot::channel();
-        let mut body_started_tx = Some(body_started_tx);
+        let body_started_tx = Some(body_started_tx);
         let body = Body::from_stream(futures_util::stream::unfold(
             (body_rx, body_started_tx),
             |(mut rx, mut started_tx)| async move {
