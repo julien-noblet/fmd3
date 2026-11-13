@@ -264,7 +264,7 @@ async fn dispatch(State(manager): State<SharedManager>, req: Request) -> Respons
         .visitors
         .iter_mut()
         .find(|v| Some(v.key.as_str()) == key.as_deref());
-    if path == "/api/auth/login" {
+    if path == "/api/auth/login" && method == Method::POST {
         let Some(visitor) = visitor else {
             return json_response(
                 StatusCode::UNAUTHORIZED,
