@@ -88,6 +88,16 @@ required: multiple replicas do not share the queue or enforce a global limit.
 Do not run download workers for the demo. When publishing it, use HTTPS and a
 trusted reverse proxy that sets `X-Forwarded-Proto: https`.
 
+With the Helm chart, enable demo mode and disable download workers:
+
+```bash
+helm upgrade --install fmd3 ./charts/fmd3 \
+  --set server.env.FMD_DEMO_MODE=true \
+  --set server.env.DEMO_SLOTS=10 \
+  --set server.replicaCount=1 \
+  --set worker.enabled=false
+```
+
 ---
 
 ## 💻 CLI Commands
