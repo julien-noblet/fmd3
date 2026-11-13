@@ -3,6 +3,9 @@
 global:
   imagePullSecrets: []
 
+# Node selector applied to all pods (e.g. kubernetes.io/arch: amd64)
+nodeSelector: {}
+
 image:
   repository: ghcr.io/fmd-project-team/fmd3
   pullPolicy: IfNotPresent

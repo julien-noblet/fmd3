@@ -17,6 +17,10 @@ spec:
         {{- include "fmd3.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: server
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: fmd3-server
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
