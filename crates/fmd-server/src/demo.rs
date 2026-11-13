@@ -902,6 +902,7 @@ mod tests {
     async fn stalled_login_body_does_not_lock_manager_and_expired_slot_is_rejected() {
         let manager = manager(2).await;
         let (cookie, credentials) = reserve(&manager, None).await;
+        let (other_cookie, _) = reserve(&manager, None).await;
         let (body_tx, body_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
         let (body_started_tx, body_started_rx) = tokio::sync::oneshot::channel();
         let body_started_tx = Some(body_started_tx);
@@ -931,10 +932,13 @@ mod tests {
         let login_task = tokio::spawn(login_request);
         body_started_rx.await.unwrap();
 
-        let (other_cookie, _) =
-            tokio::time::timeout(Duration::from_secs(1), reserve(&manager, None))
-                .await
-                .expect("stalled body must not block other reservations");
+        let (_, other_status) = tokio::time::timeout(
+            Duration::from_secs(2),
+            reserve(&manager, Some(&other_cookie)),
+        )
+        .await
+        .expect("stalled body must not block other reservations");
+        assert_eq!(other_status["status"], "reserved");
         {
             let mut state = manager.lock().await;
             let visitor = state
