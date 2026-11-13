@@ -121,12 +121,12 @@ process.stdin.on('end', async () => {
         vm.runInContext(code, sandbox);
         await new Promise(resolve => setImmediate(resolve));
         vm.runInContext("demoMode = true; activeSyncInfo = {module_id: 'test'}; updateSyncButton();", sandbox);
-        if (!classes.has('hidden')) throw new Error('demo sync button is visible');
+        if (classes.has('hidden')) throw new Error('demo sync button is hidden');
         await sandbox.toggleCatalogSync();
         if (requests.includes('/api/catalog/sync/cancel')) throw new Error('demo mode sent a cancellation request');
         vm.runInContext("activeSyncInfo = null; catalogModule = 'test';", sandbox);
         await sandbox.toggleCatalogSync();
-        if (requests.some(url => url.startsWith('/api/catalog/sync/'))) throw new Error('demo mode started a catalog sync');
+        if (!requests.includes('/api/catalog/sync/test')) throw new Error('demo mode did not start a catalog sync');
 
         vm.runInContext("demoMode = false; activeSyncInfo = {module_id: 'test'}; bannerCleared = false; updateSyncBanner = () => { bannerCleared = true };", sandbox);
         await sandbox.toggleCatalogSync();

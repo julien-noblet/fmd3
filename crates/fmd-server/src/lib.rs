@@ -123,6 +123,13 @@ impl CatalogSyncManager {
         let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let mut guard = self.active_cancel.lock().await;
+            if guard.is_some() {
+                warn!(
+                    "A catalog sync is already running; skipping {}",
+                    module.name
+                );
+                return;
+            }
             *guard = Some((module.id.clone(), cancel_token.clone()));
             let mut info_guard = self.active_info.lock().await;
             *info_guard = Some(ActiveSyncInfo {
@@ -1219,11 +1226,23 @@ async fn load_manga_info(
     allow_force: bool,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let manga_id = format!("{}:{}", req.module_id, req.url);
+    if state.shared_cache.is_some()
+        && (req.url.contains("://") || req.url.starts_with("//"))
+        && !fmd_net::is_public_url(&req.url)
+    {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Forbidden destination".into(),
+        ));
+    }
 
     // 1. Check cache if not forcing refresh
     if !allow_force {
         if let Ok(Some(cached)) = state.cache_db().get_manga_cache(&manga_id).await {
-            if !cached.is_expired() {
+            if !cached.is_expired()
+                && (state.shared_cache.is_none()
+                    || chrono::Utc::now() < cached.cached_at + chrono::Duration::hours(24))
+            {
                 if let (Ok(mut info), Ok(chapters)) = (
                     serde_json::from_str::<MangaInfoResult>(&cached.metadata_json),
                     serde_json::from_str::<Vec<fmd_engine_lua::ChapterItem>>(&cached.chapters_json),
@@ -1248,13 +1267,6 @@ async fn load_manga_info(
                 }
             }
         }
-    }
-
-    if state.shared_cache.is_some() {
-        return Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "Live scraping is unavailable in demo mode; manga is not in the public cache".into(),
-        ));
     }
 
     // 2. Fetch fresh from engine with rate limiting
@@ -1286,7 +1298,11 @@ async fn load_manga_info(
             save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
 
             let now = chrono::Utc::now();
-            let expires_at = policy.calculate_expiration(now);
+            let expires_at = if state.shared_cache.is_some() {
+                now + chrono::Duration::hours(24)
+            } else {
+                policy.calculate_expiration(now)
+            };
             let metadata_json = serde_json::to_string(&info).unwrap_or_default();
             let chapters_json = serde_json::to_string(&info.chapters).unwrap_or_default();
 
@@ -2556,8 +2572,37 @@ async fn trigger_catalog_sync(
             )
         })?;
 
+    if state.shared_cache.is_some() {
+        let status = state
+            .cache_db()
+            .get_module_sync_status(&module.id)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if status.is_some_and(|status| {
+            status.status == "Completed"
+                && status.last_synced_at.is_some_and(|time| {
+                    chrono::Utc::now().signed_duration_since(time) < chrono::Duration::hours(24)
+                })
+        }) {
+            return Ok(Json(
+                serde_json::json!({"status": "cached", "module_id": module.id}),
+            ));
+        }
+    }
+
     let sm = state.sync_manager.clone();
-    let engine = state.engine.clone();
+    let engine = if state.shared_cache.is_some() {
+        Arc::new(Mutex::new(LuaModuleEngine::new_public_only().map_err(
+            |error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+            },
+        )?))
+    } else {
+        state.engine.clone()
+    };
     let db = state.cache_db().clone();
     let ws = state.ws_sender.clone();
     let catalog_ws = state.catalog_ws_sender.clone();
@@ -2603,7 +2648,7 @@ async fn proxy_image(
         )
     })?;
 
-    let client = fmd_net::HttpClient::new()
+    let client = fmd_net::HttpClient::new_public_only()
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut headers = std::collections::HashMap::new();
