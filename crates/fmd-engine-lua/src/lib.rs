@@ -66,9 +66,18 @@ pub struct LuaModuleEngine {
 
 impl LuaModuleEngine {
     pub fn new() -> Result<Self> {
+        Self::with_http_client(HttpClient::new().map_err(|e| EngineError::Custom(e.to_string()))?)
+    }
+
+    pub fn new_public_only() -> Result<Self> {
+        Self::with_http_client(
+            HttpClient::new_public_only().map_err(|e| EngineError::Custom(e.to_string()))?,
+        )
+    }
+
+    fn with_http_client(http_client: HttpClient) -> Result<Self> {
         let lua = Lua::new();
         let modules = Arc::new(Mutex::new(Vec::new()));
-        let http_client = HttpClient::new().map_err(|e| EngineError::Custom(e.to_string()))?;
 
         // 1. Configure package.path and sandbox dangerous package capabilities
         let package: Table = lua.globals().get("package")?;

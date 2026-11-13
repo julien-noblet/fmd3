@@ -53,6 +53,7 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
         }
 
         let client = client_get.clone();
+        let public_only = client.is_public_only();
         let bytes_clone = bytes_get.clone();
         let code_clone = code_get.clone();
 
@@ -78,6 +79,14 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
                 }
                 Ok(status < 400)
             }
+            result if public_only => Err(mlua::Error::RuntimeError(format!(
+                "Scraper HTTP GET failed: {}",
+                match result {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "network worker panicked".into(),
+                    Ok(Ok(_)) => unreachable!(),
+                }
+            ))),
             _ => {
                 if let Ok(mut rc) = code_clone.lock() {
                     *rc = 500;
@@ -104,6 +113,7 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
 
         let mime: Option<String> = http_table_ref.get("MimeType").ok();
         let client = client_post.clone();
+        let public_only = client.is_public_only();
         let bytes_clone = bytes_post.clone();
         let code_clone = code_post.clone();
 
@@ -129,6 +139,14 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
                 }
                 Ok(status < 400)
             }
+            result if public_only => Err(mlua::Error::RuntimeError(format!(
+                "Scraper HTTP POST failed: {}",
+                match result {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "network worker panicked".into(),
+                    Ok(Ok(_)) => unreachable!(),
+                }
+            ))),
             _ => {
                 if let Ok(mut rc) = code_clone.lock() {
                     *rc = 500;

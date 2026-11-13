@@ -723,8 +723,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             const icon = document.getElementById('sync-icon');
             const label = document.getElementById('sync-label');
             if (!btn || !icon || !label) return;
-            btn.classList.toggle('hidden', demoMode);
-            if (demoMode) return;
+            btn.classList.remove('hidden');
 
             if (activeSyncInfo) {
                 btn.className = "px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg text-sm transition flex items-center gap-2 shadow-lg shadow-amber-600/20";
@@ -791,7 +790,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         }
 
         async function toggleCatalogSync() {
-            if (demoMode) return;
+            if (demoMode && activeSyncInfo) return;
             if (activeSyncInfo) {
                 try {
                     const response = await fetch('/api/catalog/sync/cancel', { method: 'POST' });
@@ -815,6 +814,12 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 if (!res.ok) {
                     const err = await res.text();
                     throw new Error(err);
+                }
+                const result = await res.json();
+                if (result.status === 'cached') {
+                    await loadCatalogStatus();
+                    await loadCatalog(true);
+                    return;
                 }
                 activeSyncInfo = {
                     module_id: catalogModule,
