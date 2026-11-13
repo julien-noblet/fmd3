@@ -32,6 +32,10 @@ spec:
               value: {{ .Values.server.basePath | quote }}
             - name: RUST_LOG
               value: {{ .Values.server.env.RUST_LOG | quote }}
+            - name: FMD_DEMO_MODE
+              value: {{ .Values.server.env.FMD_DEMO_MODE | quote }}
+            - name: DEMO_SLOTS
+              value: {{ .Values.server.env.DEMO_SLOTS | quote }}
             {{- if or .Values.nats.enabled .Values.nats.customUrl }}
             - name: FMD_NATS_URL
               value: {{ include "fmd3.natsUrl" . | quote }}

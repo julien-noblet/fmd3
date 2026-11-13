@@ -21,6 +21,8 @@ server:
       memory: "256Mi"
   env:
     RUST_LOG: "info"
+    FMD_DEMO_MODE: "false"
+    DEMO_SLOTS: "10"
 
 worker:
   enabled: true
