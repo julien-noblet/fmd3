@@ -32,6 +32,9 @@ spec:
               value: {{ .Values.server.basePath | quote }}
             - name: RUST_LOG
               value: {{ .Values.server.env.RUST_LOG | quote }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- if or .Values.nats.enabled .Values.nats.customUrl }}
             - name: FMD_NATS_URL
               value: {{ include "fmd3.natsUrl" . | quote }}

@@ -21,6 +21,8 @@ server:
       memory: "256Mi"
   env:
     RUST_LOG: "info"
+  # Extra env entries for the server (e.g. FMD_DEMO_MODE, DEMO_SLOTS)
+  extraEnv: []
 
 worker:
   enabled: true
