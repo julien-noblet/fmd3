@@ -175,6 +175,9 @@ process.stdin.on('data', d => code += d);
 process.stdin.on('end', async () => {
     const storage = new Map([['fmd_demo_ended', '1']]);
     const requests = [];
+    const timers = new Map();
+    const sockets = [];
+    let nextTimer = 0;
     let authenticated = true;
     const sandbox = {
         document: { getElementById: () => null, querySelectorAll: () => [], documentElement: {} },
@@ -189,10 +192,21 @@ process.stdin.on('end', async () => {
             requests.push(url);
             const data = url === '/api/demo/info' ? { demo: true }
                 : url === '/api/auth/status' ? { authenticated, user: authenticated ? { username: 'demo', role: 'user' } : null, permissions: {} }
+                : url === '/api/demo/reservation' ? { status: 'active' }
                 : {};
             return { status: 200, ok: true, json: async () => data };
         },
-        console, setTimeout: () => {}, clearTimeout: () => {},
+        console,
+        setTimeout: (callback, delay) => {
+            const id = ++nextTimer;
+            timers.set(id, { callback, delay });
+            return id;
+        },
+        clearTimeout: id => timers.delete(id),
+        WebSocket: class {
+            constructor() { sockets.push(this); this.readyState = 1; }
+            close() { this.readyState = 3; }
+        },
         history: { replaceState: () => {}, pushState: () => {} },
         addEventListener: () => {},
         location: { protocol: 'http:', host: 'localhost', hash: '' },
@@ -219,6 +233,34 @@ process.stdin.on('end', async () => {
         if (storage.get('fmd_demo_ended') !== '1' || storage.has('fmd_demo_active')) {
             throw new Error('expired restored session was not marked ended');
         }
+        authenticated = true;
+        vm.runInContext('demoEnded = false; loadAppData = () => { appDataLoads++ }; let appDataLoads = 0;', sandbox);
+        await sandbox.pollDemoReservation();
+        if (vm.runInContext('appDataLoads', sandbox) !== 1) {
+            throw new Error('recovered active demo session did not load app data');
+        }
+        sandbox.connectWs();
+        sockets[0].onclose();
+        const reconnect = [...timers.entries()].find(([, timer]) => timer.delay === 3000);
+        if (!reconnect) throw new Error('socket close did not schedule a reconnect');
+        sandbox.endDemo(true);
+        if (timers.has(reconnect[0])) throw new Error('ending demo did not cancel reconnect');
+        reconnect[1].callback();
+        if (sockets.length !== 1) throw new Error('ended demo reconnected without authentication');
+        vm.runInContext('demoEnded = false;', sandbox);
+        sandbox.connectWs();
+        if (sockets.length !== 1) throw new Error('unauthenticated session reconnected');
+        vm.runInContext('demoEnded = true;', sandbox);
+        vm.runInContext("currentUser = { username: 'demo' };", sandbox);
+        sandbox.connectWs();
+        if (sockets.length !== 1) throw new Error('ended demo reconnected despite having a user');
+        vm.runInContext('demoEnded = false;', sandbox);
+        sandbox.connectWs();
+        sockets[1].onclose();
+        const retry = [...timers.values()].find(timer => timer.delay === 3000);
+        if (!retry) throw new Error('active demo did not schedule a reconnect');
+        retry.callback();
+        if (sockets.length !== 3) throw new Error('active demo did not reconnect');
     } catch (e) {
         console.error(e);
         process.exitCode = 1;

@@ -29,6 +29,7 @@ struct Visitor {
     key: String,
     last_seen: Instant,
     slot: Option<Slot>,
+    assignment: Option<uuid::Uuid>,
 }
 
 struct Slot {
@@ -50,6 +51,9 @@ struct Manager {
     base_path: String,
     fallback: Router,
     admissions: VecDeque<Instant>,
+    assigning: bool,
+    #[cfg(test)]
+    slot_creation_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Manager {
@@ -72,56 +76,146 @@ impl Manager {
             }
         }
     }
+}
 
-    async fn assign(&mut self) -> anyhow::Result<()> {
-        let used = self.visitors.iter().filter(|v| v.slot.is_some()).count();
-        for _ in used..self.slots {
-            let Some(index) = self.visitors.iter().position(|v| v.slot.is_none()) else {
-                break;
-            };
-            let password = generate_secure_token();
-            let username = format!("demo-{}", uuid::Uuid::new_v4().simple());
-            let db = Database::new_in_memory().await?;
-            let permissions = UserPermissions {
-                can_download: false,
-                can_manage_favorites: true,
-                can_trigger_catalog_sync: false,
-                can_force_refresh: false,
-                can_view_modules: true,
-                ..UserPermissions::default()
-            };
-            db.create_user(
-                &username,
-                Some(&password),
-                Role::User,
-                Some(permissions),
-                None,
-                None,
-            )
-            .await?;
-            let mut state = self.base.clone();
-            state.db = db.clone();
-            let (sender, _) = broadcast::channel(100);
-            state.ws_sender = sender.clone();
-            let (shutdown, receiver) = watch::channel(false);
-            state.demo_shutdown = Some(receiver);
-            let app = build_router(state, &self.base_path);
-            let visitor = &mut self.visitors[index];
-            visitor.last_seen = Instant::now();
-            visitor.slot = Some(Slot {
-                username,
-                password,
-                logged_in: false,
-                db,
-                #[cfg(test)]
-                ws_sender: sender,
-                app,
-                shutdown,
-                login_lock: Arc::new(Mutex::new(())),
-            });
-        }
-        Ok(())
+async fn create_slot(mut state: AppState, base_path: String) -> anyhow::Result<Slot> {
+    let password = generate_secure_token();
+    let username = format!("demo-{}", uuid::Uuid::new_v4().simple());
+    let db = Database::new_in_memory().await?;
+    let permissions = UserPermissions {
+        can_download: false,
+        can_manage_favorites: true,
+        can_trigger_catalog_sync: false,
+        can_force_refresh: false,
+        can_view_modules: true,
+        ..UserPermissions::default()
+    };
+    db.create_user(
+        &username,
+        Some(&password),
+        Role::User,
+        Some(permissions),
+        None,
+        None,
+    )
+    .await?;
+    state.db = db.clone();
+    let (sender, _) = broadcast::channel(100);
+    state.ws_sender = sender.clone();
+    let (shutdown, receiver) = watch::channel(false);
+    state.demo_shutdown = Some(receiver);
+    let app = build_router(state, &base_path);
+    Ok(Slot {
+        username,
+        password,
+        logged_in: false,
+        db,
+        #[cfg(test)]
+        ws_sender: sender,
+        app,
+        shutdown,
+        login_lock: Arc::new(Mutex::new(())),
+    })
+}
+
+fn assign_slots(
+    manager: &SharedManager,
+    state: &mut Manager,
+) -> Option<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    if state.assigning {
+        return None;
     }
+    let used = state
+        .visitors
+        .iter()
+        .filter(|v| v.slot.is_some() || v.assignment.is_some())
+        .count();
+    let count = state.slots.saturating_sub(used);
+    let assignments: Vec<_> = state
+        .visitors
+        .iter_mut()
+        .filter(|v| v.slot.is_none() && v.assignment.is_none())
+        .take(count)
+        .map(|visitor| {
+            let id = uuid::Uuid::new_v4();
+            visitor.assignment = Some(id);
+            (visitor.key.clone(), id)
+        })
+        .collect();
+    if assignments.is_empty() {
+        return None;
+    }
+    state.assigning = true;
+
+    let manager = manager.clone();
+    let base = state.base.clone();
+    let base_path = state.base_path.clone();
+    #[cfg(test)]
+    let gate = state.slot_creation_gate.clone();
+    Some(tokio::spawn(async move {
+        let jobs = assignments.iter().map(|_| {
+            let base = base.clone();
+            let base_path = base_path.clone();
+            #[cfg(test)]
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    gate.acquire()
+                        .await
+                        .context("Slot creation gate closed")?
+                        .forget();
+                }
+                let runtime = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || runtime.block_on(create_slot(base, base_path)))
+                    .await
+                    .context("Demo slot creation task failed")?
+            })
+        });
+        let results = futures_util::future::join_all(jobs).await;
+        let mut state = manager.lock().await;
+        let mut error = None;
+        let mut discarded = Vec::new();
+        for ((key, id), result) in assignments.into_iter().zip(results) {
+            let result = result.context("Demo slot worker failed").and_then(|r| r);
+            let visitor = state
+                .visitors
+                .iter_mut()
+                .find(|v| v.key == key && v.assignment == Some(id));
+            match (visitor, result) {
+                (Some(visitor), Ok(slot)) => {
+                    visitor.assignment = None;
+                    if error.is_none() && visitor.last_seen.elapsed() < QUEUE_TIMEOUT {
+                        visitor.last_seen = Instant::now();
+                        visitor.slot = Some(slot);
+                    } else {
+                        discarded.push(slot);
+                    }
+                }
+                (Some(visitor), Err(err)) => {
+                    visitor.assignment = None;
+                    if error.is_none() {
+                        error = Some(err);
+                    }
+                }
+                (None, Ok(slot)) => discarded.push(slot),
+                (None, Err(err)) => warn!("Failed to create expired demo slot: {err:#}"),
+            }
+        }
+        state.assigning = false;
+        drop(state);
+        for slot in discarded {
+            let _ = slot.shutdown.send(true);
+            slot.db.pool().close().await;
+        }
+        match error {
+            Some(error) => {
+                warn!("Failed to assign demo slot: {error:#}");
+                Err(error)
+            }
+            None => Ok(()),
+        }
+    }))
 }
 
 async fn close_visitor(visitor: Visitor) {
@@ -155,26 +249,26 @@ async fn dispatch(State(manager): State<SharedManager>, req: Request) -> Respons
         return json_response(StatusCode::OK, json!({"demo": true}));
     }
     if path == "/api/demo/reservation" && method == Method::POST {
-        let mut manager = manager.lock().await;
-        manager.expire().await;
+        let mut state = manager.lock().await;
+        state.expire().await;
         let key = key
-            .filter(|key| manager.visitors.iter().any(|v| &v.key == key))
+            .filter(|key| state.visitors.iter().any(|v| &v.key == key))
             .unwrap_or_else(generate_secure_token);
-        if let Some(visitor) = manager.visitors.iter_mut().find(|v| v.key == key) {
+        if let Some(visitor) = state.visitors.iter_mut().find(|v| v.key == key) {
             if visitor.slot.is_none() {
                 visitor.last_seen = Instant::now();
             }
         } else {
             let now = Instant::now();
-            while manager
+            while state
                 .admissions
                 .front()
                 .is_some_and(|time| now.duration_since(*time) >= Duration::from_secs(60))
             {
-                manager.admissions.pop_front();
+                state.admissions.pop_front();
             }
-            if manager.visitors.iter().filter(|v| v.slot.is_none()).count() >= MAX_WAITING
-                || manager.admissions.len() >= MAX_NEW_VISITORS_PER_MINUTE
+            if state.visitors.iter().filter(|v| v.slot.is_none()).count() >= MAX_WAITING
+                || state.admissions.len() >= MAX_NEW_VISITORS_PER_MINUTE
             {
                 let mut response = json_response(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -185,25 +279,34 @@ async fn dispatch(State(manager): State<SharedManager>, req: Request) -> Respons
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
                 return response;
             }
-            manager.admissions.push_back(now);
-            manager.visitors.push_back(Visitor {
+            state.admissions.push_back(now);
+            state.visitors.push_back(Visitor {
                 key: key.clone(),
                 last_seen: Instant::now(),
                 slot: None,
+                assignment: None,
             });
         }
-        if let Err(error) = manager.assign().await {
-            tracing::error!("Failed to create demo slot: {error:#}");
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error": "Demo slot unavailable"}),
-            );
+        let assignments = assign_slots(&manager, &mut state);
+        drop(state);
+        if let Some(assignments) = assignments {
+            match assignments.await {
+                Ok(Ok(())) => {}
+                result => {
+                    if let Err(error) = result {
+                        warn!("Demo slot assignment task failed: {error}");
+                    }
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": "Demo slot unavailable"}),
+                    );
+                }
+            }
         }
-        let visitor = manager
-            .visitors
-            .iter()
-            .find(|v| v.key == key)
-            .expect("visitor exists");
+        let manager = manager.lock().await;
+        let Some(visitor) = manager.visitors.iter().find(|v| v.key == key) else {
+            return json_response(StatusCode::UNAUTHORIZED, json!({"error": "Demo expired"}));
+        };
         let body = if let Some(slot) = &visitor.slot {
             if slot.logged_in {
                 json!({"status": "active"})
@@ -509,16 +612,23 @@ pub async fn run_server(
         base_path: base_path.to_owned(),
         fallback,
         admissions: VecDeque::new(),
+        assigning: false,
+        #[cfg(test)]
+        slot_creation_gate: None,
     }));
     let cleanup = manager.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
-            let mut manager = cleanup.lock().await;
-            manager.expire().await;
-            if let Err(error) = manager.assign().await {
-                warn!("Failed to assign demo slot: {error:#}");
+            let mut state = cleanup.lock().await;
+            state.expire().await;
+            let assignments = assign_slots(&cleanup, &mut state);
+            drop(state);
+            if let Some(assignments) = assignments {
+                if let Err(error) = assignments.await {
+                    warn!("Demo slot assignment task failed: {error}");
+                }
             }
         }
     });
@@ -616,6 +726,8 @@ mod tests {
             base,
             fallback,
             admissions: VecDeque::new(),
+            assigning: false,
+            slot_creation_gate: None,
         }))
     }
 
@@ -712,6 +824,534 @@ mod tests {
             1
         );
         assert_eq!(second.db.get_catalog_total_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn pending_assignments_do_not_block_visitors_and_preserve_capacity() {
+        let manager = manager(3).await;
+        let (active_cookie, _) = reserve(&manager, None).await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let assignments = {
+            let mut state = manager.lock().await;
+            state.slot_creation_gate = Some(gate.clone());
+            for key in ["first", "second", "third"] {
+                state.visitors.push_back(Visitor {
+                    key: key.into(),
+                    last_seen: Instant::now(),
+                    slot: None,
+                    assignment: None,
+                });
+            }
+            let assignments = assign_slots(&manager, &mut state).unwrap();
+            assert!(state.visitors[1].assignment.is_some());
+            assert!(state.visitors[2].assignment.is_some());
+            assert!(state.visitors[3].assignment.is_none());
+            assignments
+        };
+        let activity = tokio::time::timeout(
+            Duration::from_secs(2),
+            call(
+                &manager,
+                Method::POST,
+                "/api/demo/activity",
+                Some(&active_cookie),
+                "",
+            ),
+        )
+        .await
+        .expect("slot creation blocked activity");
+        assert_eq!(activity.status(), StatusCode::OK);
+        let logout = tokio::time::timeout(
+            Duration::from_secs(2),
+            call(
+                &manager,
+                Method::POST,
+                "/api/auth/logout",
+                Some("fmd_demo=first"),
+                "",
+            ),
+        )
+        .await
+        .expect("slot creation blocked logout");
+        assert_eq!(logout.status(), StatusCode::OK);
+        let (_, queued) = reserve(&manager, Some("fmd_demo=third")).await;
+        assert_eq!(queued["status"], "waiting");
+        gate.add_permits(2);
+        assignments.await.unwrap().unwrap();
+        {
+            let state = manager.lock().await;
+            assert!(!state.visitors.iter().any(|v| v.key == "first"));
+            assert!(state
+                .visitors
+                .iter()
+                .find(|v| v.key == "second")
+                .unwrap()
+                .slot
+                .is_some());
+            assert!(state
+                .visitors
+                .iter()
+                .find(|v| v.key == "third")
+                .unwrap()
+                .slot
+                .is_none());
+        }
+        gate.add_permits(1);
+        assert_eq!(
+            reserve(&manager, Some("fmd_demo=third")).await.1["status"],
+            "reserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_reservation_request_does_not_strand_assignment() {
+        let manager = manager(1).await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        manager.lock().await.slot_creation_gate = Some(gate.clone());
+        let request_manager = manager.clone();
+        let request = tokio::spawn(async move { reserve(&request_manager, None).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if manager.lock().await.assigning {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let state = manager.lock().await;
+                if !state.assigning {
+                    assert!(state.visitors[0].slot.is_some());
+                    break;
+                }
+                drop(state);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled request stranded its assignment");
+    }
+
+    #[tokio::test]
+    async fn failed_assignment_can_be_retried() {
+        let manager = manager(1).await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        gate.close();
+        {
+            let mut state = manager.lock().await;
+            state.slot_creation_gate = Some(gate);
+            state.visitors.push_back(Visitor {
+                key: "visitor".into(),
+                last_seen: Instant::now(),
+                slot: None,
+                assignment: None,
+            });
+        }
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/demo/reservation",
+            Some("fmd_demo=visitor"),
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        {
+            let mut state = manager.lock().await;
+            assert!(!state.assigning);
+            assert!(state.visitors[0].assignment.is_none());
+            state.slot_creation_gate = None;
+        }
+        assert_eq!(
+            reserve(&manager, Some("fmd_demo=visitor")).await.1["status"],
+            "reserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_manga_fetch_populates_only_the_visitors_library() {
+        let manager = manager(2).await;
+        let (cookie_a, _) = reserve(&manager, None).await;
+        let (cookie_b, credentials) = reserve(&manager, None).await;
+        let info = fmd_engine_lua::MangaInfoResult {
+            title: "Cached manga".into(),
+            original_url: "https://example.com/manga".into(),
+            cover_url: Some("https://example.com/cover.jpg".into()),
+            authors: Some("Author".into()),
+            genres: vec!["Adventure".into()],
+            summary: Some("Summary".into()),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+        {
+            let state = manager.lock().await;
+            state
+                .base
+                .cache_db()
+                .save_manga_cache(&fmd_core::MangaCacheItem {
+                    manga_id: format!("test:{}", info.original_url),
+                    module_id: "test".into(),
+                    title: info.title.clone(),
+                    cover_url: info.cover_url.clone(),
+                    metadata_json: serde_json::to_string(&info).unwrap(),
+                    chapters_json: serde_json::to_string(&info.chapters).unwrap(),
+                    cached_at: now,
+                    expires_at: now + chrono::Duration::hours(1),
+                })
+                .await
+                .unwrap();
+        }
+
+        let login = json!({
+            "username": credentials["username"],
+            "password": credentials["password"]
+        })
+        .to_string();
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/auth/login",
+            Some(&cookie_b),
+            &login,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("{cookie_b}; {session}");
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/manga/fetch",
+            Some(&cookies),
+            &json!({"module_id": "test", "url": info.original_url}).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["is_cached"], true);
+
+        let response = call(&manager, Method::GET, "/api/mangas", Some(&cookies), "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mangas: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(mangas.as_array().unwrap().len(), 1);
+        assert_eq!(mangas[0]["id"], "test:https://example.com/manga");
+        assert_eq!(mangas[0]["title"], "Cached manga");
+
+        let state = manager.lock().await;
+        let visitor_slot = state
+            .visitors
+            .iter()
+            .find(|visitor| cookie_b.ends_with(&visitor.key))
+            .unwrap()
+            .slot
+            .as_ref()
+            .unwrap();
+        let metadata: (String, String, String, String) =
+            sqlx::query_as("SELECT cover_url, author, description, genres FROM mangas")
+                .fetch_one(visitor_slot.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            metadata,
+            (
+                "https://example.com/cover.jpg".into(),
+                "Author".into(),
+                "Summary".into(),
+                "[\"Adventure\"]".into()
+            )
+        );
+        let other_slot = state
+            .visitors
+            .iter()
+            .find(|visitor| cookie_a.ends_with(&visitor.key))
+            .unwrap()
+            .slot
+            .as_ref()
+            .unwrap();
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM mangas")
+            .fetch_one(other_slot.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn demo_favorites_and_merger_reuse_shared_manga_cache() {
+        let manager = manager(2).await;
+        {
+            let mut state = manager.lock().await;
+            state.base.modules = Arc::new(vec![fmd_engine_lua::WebsiteModule {
+                id: "test".into(),
+                name: "test".into(),
+                file_path: "/missing-module.lua".into(),
+                ..Default::default()
+            }]);
+            let now = chrono::Utc::now();
+            for url in ["primary", "secondary"] {
+                let info = fmd_engine_lua::MangaInfoResult {
+                    title: url.into(),
+                    original_url: url.into(),
+                    chapters: vec![fmd_engine_lua::ChapterItem {
+                        title: "Chapter 1".into(),
+                        url: format!("{url}/1"),
+                    }],
+                    ..Default::default()
+                };
+                state
+                    .base
+                    .cache_db()
+                    .save_manga_cache(&fmd_core::MangaCacheItem {
+                        manga_id: format!("test:{url}"),
+                        module_id: "test".into(),
+                        title: info.title.clone(),
+                        cover_url: None,
+                        metadata_json: serde_json::to_string(&info).unwrap(),
+                        chapters_json: serde_json::to_string(&info.chapters).unwrap(),
+                        cached_at: now,
+                        expires_at: now + chrono::Duration::hours(1),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        let (cookie_a, _) = reserve(&manager, None).await;
+        let (cookie_b, credentials) = reserve(&manager, None).await;
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/auth/login",
+            Some(&cookie_b),
+            &json!({"username": credentials["username"], "password": credentials["password"]})
+                .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = response.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("{cookie_b}; {session}");
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/manga/merge",
+            Some(&cookies),
+            &json!({
+                "primary": {"module_id": "test", "url": "primary"},
+                "secondary": {"module_id": "test", "url": "secondary"}
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/favorites",
+            Some(&cookies),
+            &json!({"module_id": "test", "url": "primary", "title": "primary"}).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (db, other_db) = {
+            let state = manager.lock().await;
+            let slot_db = |cookie: &str| {
+                state
+                    .visitors
+                    .iter()
+                    .find(|v| cookie.ends_with(&v.key))
+                    .unwrap()
+                    .slot
+                    .as_ref()
+                    .unwrap()
+                    .db
+                    .clone()
+            };
+            (slot_db(&cookie_b), slot_db(&cookie_a))
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chapters")
+                    .fetch_one(db.pool())
+                    .await
+                    .unwrap();
+                if count == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cached favorite chapters were not recorded");
+        for path in [
+            "/api/favorites/test%3Aprimary/check",
+            "/api/favorites/check-all",
+        ] {
+            let response = call(&manager, Method::POST, path, Some(&cookies), "").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if path.ends_with("check-all") {
+                assert_eq!(result["checked_count"], 1);
+            } else {
+                assert_eq!(result["new_chapters_count"], 0);
+            }
+        }
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chapters")
+            .fetch_one(other_db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let cache = manager.lock().await.base.cache_db().clone();
+        let mut item = cache
+            .get_manga_cache("test:primary")
+            .await
+            .unwrap()
+            .unwrap();
+        item.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        cache.save_manga_cache(&item).await.unwrap();
+        for path in [
+            "/api/favorites/test%3Aprimary/check",
+            "/api/favorites/check-all",
+        ] {
+            assert_eq!(
+                call(&manager, Method::POST, path, Some(&cookies), "")
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demo_scraping_cannot_reach_loopback_services() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/manga", listener.local_addr().unwrap());
+        let reached = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = {
+            let reached = reached.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if let Ok((mut stream, _)) = listener.accept() {
+                        reached.store(true, Ordering::SeqCst);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let mut request = [0; 4096];
+                        let _ = stream.read(&mut request);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    } else {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            })
+        };
+        let manager = manager(1).await;
+        {
+            let mut state = manager.lock().await;
+            state.base.modules = Arc::new(vec![fmd_engine_lua::WebsiteModule {
+                id: "NovelCoolFR".into(),
+                name: "NovelCoolFR".into(),
+                file_path: "../../lua/modules/NovelCoolFR.lua".into(),
+                ..Default::default()
+            }]);
+            state
+                .base
+                .cache_db()
+                .set_module_cache_policy(&fmd_core::ModuleCachePolicy {
+                    module_id: "NovelCoolFR".into(),
+                    min_delay_ms: 0,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        let (cookie, credentials) = reserve(&manager, None).await;
+        let login = call(
+            &manager,
+            Method::POST,
+            "/api/auth/login",
+            Some(&cookie),
+            &json!({"username": credentials["username"], "password": credentials["password"]})
+                .to_string(),
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let session = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("{cookie}; {session}");
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/manga/fetch",
+            Some(&cookies),
+            &json!({"module_id": "NovelCoolFR", "url": url}).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/manga/merge",
+            Some(&cookies),
+            &json!({
+                "primary": {"module_id": "NovelCoolFR", "url": url},
+                "secondary": {"module_id": "NovelCoolFR", "url": url}
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/favorites",
+            Some(&cookies),
+            &json!({"module_id": "NovelCoolFR", "url": url, "title": "test"}).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/favorites/check-all",
+            Some(&cookies),
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert!(
+            !reached.load(Ordering::SeqCst),
+            "demo reached loopback service"
+        );
     }
 
     #[tokio::test]
@@ -1192,6 +1832,7 @@ mod tests {
                     key: format!("visitor-{index}"),
                     last_seen: Instant::now(),
                     slot: None,
+                    assignment: None,
                 });
             }
         }

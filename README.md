@@ -78,8 +78,11 @@ FMD_DEMO_MODE=true DEMO_SLOTS=10 cargo run --release --bin fmd -- serve --bind 0
 separate temporary accounts; when all slots are occupied, new visitors join a
 FIFO queue. Accounts and their data expire after 20 minutes without interaction
 or on logout. Downloads, account management and API tokens are disabled.
-Restarting the server clears all sessions and the queue. Scraped public data and
-the catalog are shared and persist in `data/fmd-demo/public-cache.db`; never use
+Live scraping is disabled in demo mode: manga fetches, favorite checks and
+merges can only use unexpired manga data already in the public cache. Populate
+that cache from a trusted source before starting the demo. Restarting the
+server clears all sessions and the queue. Public data and the catalog are shared
+and persist in `data/fmd-demo/public-cache.db`; never use
 this as the data directory of a normal installation. A single demo instance is
 required: multiple replicas do not share the queue or enforce a global limit.
 Do not run download workers for the demo. When publishing it, use HTTPS and a

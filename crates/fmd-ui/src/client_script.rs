@@ -3,6 +3,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         // ==========================================
         let currentLocale = 'en';
         let ws = null;
+        let wsReconnectTimer = null;
         let allModules = [];
         let allFavorites = [];
         let currentInspectResult = null;
@@ -48,6 +49,8 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             if (dialog && dialog.open) dialog.close();
             currentUser = null;
             currentPermissions = null;
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
             if (ws) {
                 ws.onclose = null;
                 ws.close();
@@ -87,7 +90,8 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     if (credentials) credentials.classList.add('hidden');
                     if (form) form.classList.add('hidden');
                 } else if (data.status === 'active') {
-                    if (!(await checkAuthStatus())) endDemo(true);
+                    if (await checkAuthStatus()) loadAppData();
+                    else endDemo(true);
                 }
             } catch (e) {
                 console.error('Demo reservation error:', e);
@@ -1638,6 +1642,9 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         }
 
         function connectWs() {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+            if (!currentUser || (demoMode && demoEnded)) return;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${window.location.host}${BASE_PATH}/api/ws`);
 
@@ -1698,7 +1705,10 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     badge.className = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950 text-amber-400 border border-amber-800';
                     badge.innerHTML = '<span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-amber-400"></span> ' + t('nav.ws_reconnecting');
                 }
-                setTimeout(connectWs, 3000);
+                if (currentUser && !(demoMode && demoEnded)) {
+                    clearTimeout(wsReconnectTimer);
+                    wsReconnectTimer = setTimeout(connectWs, 3000);
+                }
             };
         }
 

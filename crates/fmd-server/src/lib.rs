@@ -1184,14 +1184,41 @@ struct FetchMangaRequest {
     force_refresh: bool,
 }
 
+async fn save_fetched_manga_metadata(
+    db: &Database,
+    manga_id: &str,
+    req: &FetchMangaRequest,
+    info: &MangaInfoResult,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    db.upsert_manga_metadata(
+        manga_id,
+        &req.module_id,
+        &info.title,
+        &req.url,
+        info.cover_url.as_deref(),
+        info.authors.as_deref(),
+        info.summary.as_deref(),
+        Some(&info.genres),
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn fetch_manga_info(
     auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
     Json(req): Json<FetchMangaRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let allow_force = req.force_refresh && ctx.permissions.can_force_refresh;
+    load_manga_info(&state, &req, allow_force).await
+}
+
+async fn load_manga_info(
+    state: &AppState,
+    req: &FetchMangaRequest,
+    allow_force: bool,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let manga_id = format!("{}:{}", req.module_id, req.url);
-    let can_force = ctx.permissions.can_force_refresh;
-    let allow_force = req.force_refresh && can_force;
 
     // 1. Check cache if not forcing refresh
     if !allow_force {
@@ -1202,6 +1229,7 @@ async fn fetch_manga_info(
                     serde_json::from_str::<Vec<fmd_engine_lua::ChapterItem>>(&cached.chapters_json),
                 ) {
                     info.chapters = chapters;
+                    save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
                     let mut val = serde_json::to_value(&info).unwrap_or_default();
                     if let Some(obj) = val.as_object_mut() {
                         obj.insert("is_cached".to_string(), serde_json::Value::Bool(true));
@@ -1220,6 +1248,13 @@ async fn fetch_manga_info(
                 }
             }
         }
+    }
+
+    if state.shared_cache.is_some() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Live scraping is unavailable in demo mode; manga is not in the public cache".into(),
+        ));
     }
 
     // 2. Fetch fresh from engine with rate limiting
@@ -1248,19 +1283,7 @@ async fn fetch_manga_info(
     let engine = state.engine.lock().await;
     match engine.get_manga_info(&module.file_path, &req.url) {
         Ok(info) => {
-            let _ = state
-                .db
-                .upsert_manga_metadata(
-                    &manga_id,
-                    &req.module_id,
-                    &info.title,
-                    &req.url,
-                    info.cover_url.as_deref(),
-                    info.authors.as_deref(),
-                    info.summary.as_deref(),
-                    Some(&info.genres),
-                )
-                .await;
+            save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
 
             let now = chrono::Utc::now();
             let expires_at = policy.calculate_expiration(now);
@@ -1277,7 +1300,9 @@ async fn fetch_manga_info(
                 cached_at: now,
                 expires_at,
             };
-            let _ = state.cache_db().save_manga_cache(&cache_item).await;
+            if let Err(error) = state.cache_db().save_manga_cache(&cache_item).await {
+                warn!("Failed to cache manga {}: {error}", cache_item.manga_id);
+            }
 
             let mut val = serde_json::to_value(&info).unwrap_or_default();
             if let Some(obj) = val.as_object_mut() {
@@ -1298,6 +1323,21 @@ async fn fetch_manga_info(
             format!("Erreur lors de l'extraction: {}", e),
         )),
     }
+}
+
+async fn load_demo_manga_info(
+    state: &AppState,
+    module_id: &str,
+    url: &str,
+) -> Result<MangaInfoResult, (axum::http::StatusCode, String)> {
+    let req = FetchMangaRequest {
+        module_id: module_id.to_owned(),
+        url: url.to_owned(),
+        force_refresh: false,
+    };
+    let Json(value) = load_manga_info(state, &req, false).await?;
+    serde_json::from_value(value)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -1416,15 +1456,19 @@ async fn merge_manga_sources(
     let primary_chaps = match req.primary.chapters {
         Some(ch) if !ch.is_empty() => ch,
         _ => {
-            let engine = state.engine.lock().await;
-            let info = engine
-                .get_manga_info(&primary_module.file_path, &req.primary.url)
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Erreur source primaire: {}", e),
-                    )
-                })?;
+            let info = if state.shared_cache.is_some() {
+                load_demo_manga_info(&state, &req.primary.module_id, &req.primary.url).await?
+            } else {
+                let engine = state.engine.lock().await;
+                engine
+                    .get_manga_info(&primary_module.file_path, &req.primary.url)
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Erreur source primaire: {}", e),
+                        )
+                    })?
+            };
             info.chapters
                 .into_iter()
                 .map(|c| fmd_core::ChapterItem {
@@ -1458,15 +1502,19 @@ async fn merge_manga_sources(
         let sec_chaps = match sec.chapters {
             Some(ch) if !ch.is_empty() => ch,
             _ => {
-                let engine = state.engine.lock().await;
-                let info = engine
-                    .get_manga_info(&sec_module.file_path, &sec.url)
-                    .map_err(|e| {
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Erreur source secondaire ({}): {}", sec_module.name, e),
-                        )
-                    })?;
+                let info = if state.shared_cache.is_some() {
+                    load_demo_manga_info(&state, &sec.module_id, &sec.url).await?
+                } else {
+                    let engine = state.engine.lock().await;
+                    engine
+                        .get_manga_info(&sec_module.file_path, &sec.url)
+                        .map_err(|e| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("Erreur source secondaire ({}): {}", sec_module.name, e),
+                            )
+                        })?
+                };
                 info.chapters
                     .into_iter()
                     .map(|c| fmd_core::ChapterItem {
@@ -1559,33 +1607,48 @@ async fn add_favorite(
         let db = state.db.clone();
         let m_id = manga_id.clone();
         let mod_id = req.module_id.clone();
+        let demo_state = state.shared_cache.as_ref().map(|_| state.clone());
         tokio::spawn(async move {
-            let chapters_res = {
+            let chapters_res = if let Some(state) = demo_state {
+                load_demo_manga_info(&state, &mod_id, &url)
+                    .await
+                    .map_err(|(_, error)| error)
+            } else {
                 let eng = engine.lock().await;
                 eng.get_manga_info(&file_path, &url)
+                    .map_err(|e| e.to_string())
             };
-            if let Ok(info) = chapters_res {
-                let _ = db
-                    .upsert_manga_metadata(
-                        &m_id,
-                        &mod_id,
-                        &info.title,
-                        &url,
-                        info.cover_url.as_deref(),
-                        info.authors.as_deref(),
-                        info.summary.as_deref(),
-                        Some(&info.genres),
-                    )
-                    .await;
-                let chaps: Vec<fmd_core::ChapterItem> = info
-                    .chapters
-                    .into_iter()
-                    .map(|c| fmd_core::ChapterItem {
-                        title: c.title,
-                        url: c.url,
-                    })
-                    .collect();
-                let _ = db.record_chapters(&m_id, &chaps, false).await;
+            match chapters_res {
+                Ok(info) => {
+                    if let Err(error) = db
+                        .upsert_manga_metadata(
+                            &m_id,
+                            &mod_id,
+                            &info.title,
+                            &url,
+                            info.cover_url.as_deref(),
+                            info.authors.as_deref(),
+                            info.summary.as_deref(),
+                            Some(&info.genres),
+                        )
+                        .await
+                    {
+                        warn!("Failed to save favorite metadata for {m_id}: {error}");
+                        return;
+                    }
+                    let chaps: Vec<fmd_core::ChapterItem> = info
+                        .chapters
+                        .into_iter()
+                        .map(|c| fmd_core::ChapterItem {
+                            title: c.title,
+                            url: c.url,
+                        })
+                        .collect();
+                    if let Err(error) = db.record_chapters(&m_id, &chaps, false).await {
+                        warn!("Failed to record favorite chapters for {m_id}: {error}");
+                    }
+                }
+                Err(error) => warn!("Failed to prefetch favorite chapters for {m_id}: {error}"),
             }
         });
     }
@@ -1709,21 +1772,28 @@ async fn update_favorite_settings(
 async fn check_favorite_internal(
     state: &AppState,
     fav: &fmd_core::Favorite,
-) -> Result<Vec<fmd_core::ChapterItem>, String> {
+) -> Result<Vec<fmd_core::ChapterItem>, (axum::http::StatusCode, String)> {
     let module = state
         .modules
         .iter()
         .find(|m| m.id == fav.module_id || m.name.eq_ignore_ascii_case(&fav.module_id))
-        .ok_or_else(|| format!("Module '{}' introuvable", fav.module_id))?;
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Module '{}' introuvable", fav.module_id),
+            )
+        })?;
 
     let file_path = module.file_path.clone();
     let url = fav.original_url.clone();
 
-    let info = {
+    let info = if state.shared_cache.is_some() {
+        load_demo_manga_info(state, &fav.module_id, &url).await?
+    } else {
         let engine = state.engine.lock().await;
         engine
             .get_manga_info(&file_path, &url)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
 
     let _ = state
@@ -1753,7 +1823,7 @@ async fn check_favorite_internal(
         .db
         .check_favorite_new_chapters(&fav.manga_id, &chapters)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !new_chapters.is_empty() {
         info!(
@@ -1831,9 +1901,7 @@ async fn check_single_favorite(
             )
         })?;
 
-    let new_chaps = check_favorite_internal(&state, &fav)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let new_chaps = check_favorite_internal(&state, &fav).await?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1863,9 +1931,13 @@ async fn check_all_favorites(
 
     for fav in current_favs {
         if fav.enabled {
-            if let Ok(new_chaps) = check_favorite_internal(&state, &fav).await {
-                checked_count += 1;
-                total_new += new_chaps.len();
+            match check_favorite_internal(&state, &fav).await {
+                Ok(new_chaps) => {
+                    checked_count += 1;
+                    total_new += new_chaps.len();
+                }
+                Err(error) if state.shared_cache.is_some() => return Err(error),
+                Err((_, error)) => warn!("Failed to check favorite {}: {error}", fav.manga_id),
             }
         }
     }
