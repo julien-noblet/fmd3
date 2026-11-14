@@ -130,19 +130,26 @@ fmd catalog --sync novelcool_fr
 Runs a standalone, headless background worker connected to NATS JetStream.
 
 ```bash
-fmd worker [OPTIONS]
+fmd worker [OPTIONS] --internal-token <INTERNAL_TOKEN>
 
 Options:
-      --nats <URL>         NATS JetStream broker URL [default: nats://localhost:4222]
-      --concurrency <N>    Number of concurrent downloads per worker [default: 4]
-  -d, --dir <DIR>          Modules directory [default: lua/modules]
-  -h, --help               Print help
+      --nats-url <NATS_URL>              NATS server URL [env: FMD_NATS_URL=] [default: nats://127.0.0.1:4222]
+      --server-url <SERVER_URL>          FMD3 Server API URL [env: FMD_SERVER_URL=] [default: http://127.0.0.1:8088]
+  -c, --concurrency <CONCURRENCY>        Concurrency level (concurrent tasks) [default: 2]
+  -d, --dir <DIR>                        Directory containing Lua modules [default: lua/modules]
+      --downloads-dir <DOWNLOADS_DIR>    Directory for downloaded archives [default: downloads]
+      --internal-token <INTERNAL_TOKEN>  Internal worker authentication token (required, non-empty) [env: FMD_INTERNAL_TOKEN=]
+  -h, --help                             Print help
 ```
+
+> [!IMPORTANT]
+> `fmd worker` refuses to start if `FMD_INTERNAL_TOKEN` / `--internal-token` is unset or empty. Both `fmd serve` and `fmd worker` must share the same `FMD_INTERNAL_TOKEN` value so internal progress and completion callbacks succeed.
 
 ### Example
 ```bash
-# Launch a background worker processing up to 8 parallel tasks
-fmd worker --nats nats://10.0.0.10:4222 --concurrency 8
+# Launch a background worker with shared internal authentication token
+export FMD_INTERNAL_TOKEN="replace-with-shared-secret"
+fmd worker --nats-url nats://10.0.0.10:4222 --server-url http://10.0.0.10:8088 --concurrency 8
 ```
 
 ---

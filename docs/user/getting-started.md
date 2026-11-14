@@ -32,7 +32,10 @@ services:
 
 ### 1.2 Start the Daemon
 
+When using the repository's [docker-compose.yml](../../docker-compose.yml) (which runs `fmd-server` + `fmd-worker` + `nats`), set a shared non-empty `FMD_INTERNAL_TOKEN` in your shell or `.env` file before starting:
+
 ```bash
+export FMD_INTERNAL_TOKEN="$(openssl rand -hex 32)"
 docker compose up -d
 ```
 
@@ -66,6 +69,8 @@ helm upgrade --install fmd3 ./charts/fmd3 \
   --set worker.enabled=true \
   --set worker.replicaCount=3
 ```
+
+When `worker.enabled=true`, the Helm chart automatically wires a shared `FMD_INTERNAL_TOKEN` between `fmd3-server` and `fmd3-worker` (creating a Secret automatically unless `worker.existingSecret` or `worker.internalToken` is specified).
 
 For Helm deployments, set `server.basePath` to the same path prefix configured on the ingress, for example `--set server.basePath=/reader`. The ingress may forward the prefix unchanged or strip it before forwarding.
 

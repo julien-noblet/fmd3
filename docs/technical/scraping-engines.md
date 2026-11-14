@@ -39,6 +39,12 @@ end
 
 The Rust engine intercepts `x.XPathString(query, context_node)` and evaluates the query scoped strictly within the subtree of `context_node`, ensuring accurate data extraction without leaking parent document elements.
 
+### 1.3 Sandbox & Execution Limits
+To contain untrusted or buggy Lua modules and embedded JavaScript decryptors:
+- **Capability Removal**: `load`, `loadfile`, `dofile`, `loadstring`, `io.popen`, `io.tmpfile`, `package.loadlib`, C searchers in `package.searchers`, `pb.loadfile`, and unsafe `os.*` functions (`execute`, `remove`, `rename`, `exit`, `tmpname`, `getenv`, `setlocale`) are stripped.
+- **Canonical Filesystem Confinement**: `io.open`, `io.lines`, `io.input`, and `io.output` canonicalize paths (blocking `..` traversal and symlinks escaping allowed roots) and permit read-only access under `lua/` and read/write access strictly under `userdata/`.
+- **VM & JS Resource Limits**: Lua is capped at a `64 MiB` memory limit (`set_memory_limit`) with an instruction/wall-clock hook (`50,000,000` instructions / `30s` per callback invocation), while `duktape.ExecJS` (`boa_engine`) enforces `RuntimeLimits` (`1,000,000` loop iterations, `256` recursion depth, `8 KiB` stack).
+
 ---
 
 ## 2. WebAssembly Engine (`fmd-engine-wasm`)

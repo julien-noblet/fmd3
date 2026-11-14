@@ -129,8 +129,8 @@ fmd catalog --sync novelcool_fr
 # Import legacy FMD2 userdata.db / SQLite databases
 fmd import-legacy --db path/to/userdata.db
 
-# Run as a distributed background worker connected to NATS
-fmd worker --nats nats://localhost:4222
+# Run as a distributed background worker connected to NATS (requires matching FMD_INTERNAL_TOKEN)
+FMD_INTERNAL_TOKEN="replace-with-shared-secret" fmd worker --nats-url nats://127.0.0.1:4222 --server-url http://127.0.0.1:8088
 ```
 
 ---
