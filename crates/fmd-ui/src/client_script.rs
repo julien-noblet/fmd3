@@ -513,7 +513,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     <div class="col-span-full text-center py-16 text-zinc-500 bg-zinc-900/50 border border-zinc-800 rounded-2xl">
                         <p class="text-base mb-2">${escapeHtml(t('favorites.empty'))}</p>
                         <p class="text-sm text-zinc-400 mb-4">${escapeHtml(t('favorites.empty_desc'))}</p>
-                        <button onclick="switchTab('search')" class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-medium transition">
+                        <button type="button" data-action="switch-tab" data-tab="search" class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-xs font-medium transition">
                             ${escapeHtml(t('nav.search'))} &rarr;
                         </button>
                     </div>`;
@@ -535,7 +535,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                             </span>
                         </div>
                         <div class="absolute top-2 right-2 ${demoMode ? 'hidden' : ''}">
-                            <button onclick="toggleAutoDownload('${escapeHtml(f.manga_id)}', ${!autoDlActive})" title="${autoDlActive ? escapeHtml(t('favorites.disable_auto_dl')) : escapeHtml(t('favorites.enable_auto_dl'))}" class="px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 ${autoDlActive ? 'bg-red-600 text-white shadow' : 'bg-zinc-900/80 text-zinc-400 border border-zinc-700 hover:text-white'}">
+                            <button type="button" data-action="toggle-auto-dl" data-manga-id="${escapeHtml(f.manga_id)}" data-auto-dl="${!autoDlActive ? 'true' : 'false'}" title="${autoDlActive ? escapeHtml(t('favorites.disable_auto_dl')) : escapeHtml(t('favorites.enable_auto_dl'))}" class="px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 ${autoDlActive ? 'bg-red-600 text-white shadow' : 'bg-zinc-900/80 text-zinc-400 border border-zinc-700 hover:text-white'}">
                                 <span>⚡</span> ${escapeHtml(t('favorites.auto_dl'))}: ${autoDlActive ? escapeHtml(t('common.on')) : escapeHtml(t('common.off'))}
                             </button>
                         </div>
@@ -546,11 +546,11 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     <div class="p-4 flex-1 flex flex-col justify-between">
                         <div>
                             <h3 class="font-bold text-white text-sm line-clamp-1 mb-1">${escapeHtml(f.title)}</h3>
-                            <a href="${escapeHtml(f.original_url)}" target="_blank" class="text-xs text-red-400 hover:underline line-clamp-1 font-mono mb-3 block">${escapeHtml(f.original_url)}</a>
+                            <a href="${escapeHtml(safeHttpUrl(f.original_url))}" target="_blank" rel="noopener noreferrer" class="text-xs text-red-400 hover:underline line-clamp-1 font-mono mb-3 block">${escapeHtml(f.original_url)}</a>
                             
                             <div class="flex items-center justify-between text-xs text-zinc-400 bg-zinc-950/60 p-2 rounded-lg border border-zinc-800/80 mb-2">
                                 <span class="text-[11px]">${escapeHtml(t('favorites.dl_format'))}</span>
-                                <select onchange="updateFavoriteFormat('${escapeHtml(f.manga_id)}', this.value)" class="bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 rounded px-2 py-0.5 outline-none font-mono">
+                                <select data-action="update-fav-format" data-manga-id="${escapeHtml(f.manga_id)}" class="bg-zinc-900 border border-zinc-700 text-xs text-zinc-200 rounded px-2 py-0.5 outline-none font-mono">
                                     <option value="CBZ" ${f.download_format === 'CBZ' ? 'selected' : ''}>CBZ</option>
                                     <option value="PDF" ${f.download_format === 'PDF' ? 'selected' : ''}>PDF</option>
                                     <option value="EPUB" ${f.download_format === 'EPUB' ? 'selected' : ''}>EPUB</option>
@@ -559,13 +559,13 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                             </div>
                         </div>
                         <div class="pt-3 border-t border-zinc-800 flex items-center justify-between text-xs gap-1">
-                            <button onclick="checkSingleFavorite('${escapeHtml(f.manga_id)}')" id="btn-check-${escapeHtml(f.manga_id)}" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-xs font-medium transition flex items-center gap-1 border border-zinc-700">
+                            <button type="button" data-action="check-fav" data-manga-id="${escapeHtml(f.manga_id)}" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-xs font-medium transition flex items-center gap-1 border border-zinc-700">
                                 <span>🔄</span> ${escapeHtml(t('favorites.check'))}
                             </button>
-                            <button onclick="openFavoriteForDownload('${escapeHtml(f.manga_id)}', '${escapeHtml(f.original_url)}')" class="px-2.5 py-1.5 bg-red-600/90 hover:bg-red-500 text-white rounded text-xs font-semibold transition flex items-center gap-1">
+                            <button type="button" data-action="open-fav-dl" data-manga-id="${escapeHtml(f.manga_id)}" data-url="${escapeHtml(f.original_url)}" class="px-2.5 py-1.5 bg-red-600/90 hover:bg-red-500 text-white rounded text-xs font-semibold transition flex items-center gap-1">
                                 <span>📥</span> ${escapeHtml(t('favorites.chapters'))}
                             </button>
-                            <button onclick="deleteFavorite('${escapeHtml(f.manga_id)}')" class="text-zinc-500 hover:text-red-400 p-1 text-xs" title="${escapeHtml(t('common.delete'))}">🗑️</button>
+                            <button type="button" data-action="delete-fav" data-manga-id="${escapeHtml(f.manga_id)}" class="text-zinc-500 hover:text-red-400 p-1 text-xs" title="${escapeHtml(t('common.delete'))}">🗑️</button>
                         </div>
                     </div>
                 </div>
@@ -574,7 +574,8 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
         }
 
         async function checkSingleFavorite(mangaId) {
-            const btn = document.getElementById('btn-check-' + mangaId);
+            const btn = Array.from(document.querySelectorAll('[data-action="check-fav"]'))
+                .find(el => el.dataset.mangaId === mangaId);
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = '<span class="animate-spin">⏳</span> ...';
@@ -675,12 +676,12 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 <tr class="hover:bg-zinc-800/40 transition">
                     <td class="px-5 py-3 font-semibold text-white">${escapeHtml(m.name)}</td>
                     <td class="px-5 py-3"><span class="px-2 py-0.5 rounded text-[11px] bg-zinc-800 text-zinc-300">${escapeHtml(m.category || t('common.category'))}</span></td>
-                    <td class="px-5 py-3"><a href="${escapeHtml(m.root_url)}" target="_blank" class="text-red-400 hover:underline">${escapeHtml(m.root_url)}</a></td>
+                    <td class="px-5 py-3"><a href="${escapeHtml(safeHttpUrl(m.root_url))}" target="_blank" rel="noopener noreferrer" class="text-red-400 hover:underline">${escapeHtml(m.root_url)}</a></td>
                     <td class="px-5 py-3 text-right space-x-2">
-                        <button onclick="openCatalogForModule('${escapeHtml(m.id)}')" class="px-2.5 py-1 bg-red-950 text-red-300 border border-red-800 hover:bg-red-900 rounded text-xs transition">
+                        <button type="button" data-action="open-catalog" data-module-id="${escapeHtml(m.id)}" class="px-2.5 py-1 bg-red-950 text-red-300 border border-red-800 hover:bg-red-900 rounded text-xs transition">
                             📖 ${escapeHtml(t('modules.explore'))}
                         </button>
-                        <button onclick="selectModuleForSearch('${escapeHtml(m.id)}')" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-xs transition">
+                        <button type="button" data-action="select-module-search" data-module-id="${escapeHtml(m.id)}" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-xs transition">
                             ${escapeHtml(t('modules.url_btn'))} &rarr;
                         </button>
                     </td>
@@ -912,7 +913,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 return `
                     <tr class="hover:bg-zinc-800/40 transition">
                         <td class="px-5 py-3 font-semibold text-white">
-                            <span class="hover:text-red-400 cursor-pointer" onclick="openMangaDirect('${escapeHtml(item.module_id)}', '${escapeHtml(fullLink)}')">
+                            <span class="hover:text-red-400 cursor-pointer" data-action="open-manga-direct" data-module-id="${escapeHtml(item.module_id)}" data-url="${escapeHtml(fullLink)}">
                                 ${escapeHtml(item.title)}
                             </span>
                         </td>
@@ -921,7 +922,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                         </td>
                         <td class="px-5 py-3 text-zinc-400 text-xs">${escapeHtml(dateStr)}</td>
                         <td class="px-5 py-3 text-right space-x-2">
-                            <button onclick="openMangaDirect('${escapeHtml(item.module_id)}', '${escapeHtml(fullLink)}')" class="px-3 py-1 bg-red-600/90 hover:bg-red-500 text-white rounded text-xs font-medium transition">
+                            <button type="button" data-action="open-manga-direct" data-module-id="${escapeHtml(item.module_id)}" data-url="${escapeHtml(fullLink)}" class="px-3 py-1 bg-red-600/90 hover:bg-red-500 text-white rounded text-xs font-medium transition">
                                 📥 ${escapeHtml(t('catalog.view_chapters'))}
                             </button>
                         </td>
@@ -1207,7 +1208,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                                 <span class="text-zinc-500 font-mono truncate max-w-xs">${escapeHtml(alt.url)}</span>
                             </div>
                         </div>
-                        <button onclick="mergeWithSource('${escapeHtml(alt.module_id)}', '${escapeHtml(alt.url)}', '${escapeHtml(alt.module_name || alt.module_id)}')" class="flex-shrink-0 px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg text-xs transition flex items-center gap-1 shadow-sm">
+                        <button type="button" data-action="merge-with-source" data-module-id="${escapeHtml(alt.module_id)}" data-url="${escapeHtml(alt.url)}" data-module-name="${escapeHtml(alt.module_name || alt.module_id)}" class="flex-shrink-0 px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg text-xs transition flex items-center gap-1 shadow-sm">
                             <span>🔗</span> ${escapeHtml(t('merger.btn_merge'))}
                         </button>
                     </div>
@@ -1370,12 +1371,12 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                 return `
                 <label class="flex items-center justify-between px-4 py-2 hover:bg-zinc-800/40 cursor-pointer transition select-none ${isGap ? 'bg-blue-950/20 border-l-2 border-blue-500' : ''}">
                     <div class="flex items-center gap-3">
-                        <input type="checkbox" data-index="${idx}" data-gap-fill="${isGap ? 'true' : 'false'}" ${isDl ? '' : 'checked'} onchange="updateSelectedCount()" class="chapter-cb w-4 h-4 rounded bg-zinc-950 border-zinc-700 text-red-600 focus:ring-0">
+                        <input type="checkbox" data-index="${idx}" data-gap-fill="${isGap ? 'true' : 'false'}" ${isDl ? '' : 'checked'} class="chapter-cb w-4 h-4 rounded bg-zinc-950 border-zinc-700 text-red-600 focus:ring-0">
                         <span class="font-medium text-white">${escapeHtml(ch.title)}</span>
                         ${sourceBadge}
                         ${isDl ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">${escapeHtml(t('downloads.status_downloaded'))}</span>` : ''}
                     </div>
-                    <a href="${escapeHtml(ch.url)}" target="_blank" onclick="event.stopPropagation()" class="text-zinc-500 hover:text-red-400 font-mono text-[11px] truncate max-w-xs">
+                    <a href="${escapeHtml(safeHttpUrl(ch.url))}" target="_blank" rel="noopener noreferrer" class="chapter-external-link text-zinc-500 hover:text-red-400 font-mono text-[11px] truncate max-w-xs">
                         ${escapeHtml(ch.url)}
                     </a>
                 </label>
@@ -1555,8 +1556,8 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                         <td class="px-5 py-3.5">${progressDisplay}</td>
                         <td class="px-5 py-3.5">${statusBadge}</td>
                         <td class="px-5 py-3.5 text-right space-x-2">
-                            ${d.status === 'Failed' ? `<button onclick="retryDownload('${escapeHtml(d.id)}')" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-[11px] transition">${escapeHtml(t('downloads.retry_failed'))}</button>` : ''}
-                            <button onclick="removeDownload('${escapeHtml(d.id)}')" class="text-zinc-500 hover:text-red-400 text-xs transition">${escapeHtml(t('common.delete'))}</button>
+                            ${d.status === 'Failed' ? `<button type="button" data-action="retry-download" data-download-id="${escapeHtml(d.id)}" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-[11px] transition">${escapeHtml(t('downloads.retry_failed'))}</button>` : ''}
+                            <button type="button" data-action="remove-download" data-download-id="${escapeHtml(d.id)}" class="text-zinc-500 hover:text-red-400 text-xs transition">${escapeHtml(t('common.delete'))}</button>
                         </td>
                     </tr>
                 `;
@@ -1633,12 +1634,23 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
 
         function escapeHtml(str) {
             if (!str) return '';
-            return str
+            return String(str)
                 .replace(/&/g, "&amp;")
                 .replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;")
                 .replace(/"/g, "&quot;")
                 .replace(/'/g, "&#39;");
+        }
+
+        function safeHttpUrl(rawUrl) {
+            if (!rawUrl || typeof rawUrl !== 'string') return '#';
+            try {
+                const parsed = new URL(rawUrl, window.location.origin);
+                if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                    return parsed.href;
+                }
+            } catch (_) {}
+            return '#';
         }
 
         function proxyCover(url) {
@@ -2139,10 +2151,10 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     <td class="p-4 font-mono text-sm">${permTags}</td>
                     <td class="p-4 text-zinc-400 text-xs">${dateStr}</td>
                     <td class="p-4 text-right space-x-2">
-                        <button onclick="openEditUserModal('${escapeHtml(u.id)}')" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition">
+                        <button type="button" data-action="edit-user" data-user-id="${escapeHtml(u.id)}" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition">
                             ${escapeHtml(t('common.edit'))}
                         </button>
-                        <button onclick="deleteUser('${escapeHtml(u.id)}', '${escapeHtml(u.username)}')" class="px-2.5 py-1 bg-red-950/60 hover:bg-red-900 text-red-400 rounded text-xs border border-red-900 transition">
+                        <button type="button" data-action="delete-user" data-user-id="${escapeHtml(u.id)}" data-username="${escapeHtml(u.username)}" class="px-2.5 py-1 bg-red-950/60 hover:bg-red-900 text-red-400 rounded text-xs border border-red-900 transition">
                             ${escapeHtml(t('common.delete'))}
                         </button>
                     </td>
@@ -2327,7 +2339,7 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     <td class="py-2.5 px-3 text-emerald-400">${p.ttl_value} ${escapeHtml(unitLabel)}</td>
                     <td class="py-2.5 px-3 text-cyan-400">${p.min_delay_ms} ms</td>
                     <td class="py-2.5 px-3 text-right">
-                        <button onclick="editCachePolicy('${escapeHtml(p.module_id)}', ${p.ttl_value}, '${escapeHtml(p.ttl_unit)}', ${p.min_delay_ms})" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[11px]">
+                        <button type="button" data-action="edit-cache-policy" data-module-id="${escapeHtml(p.module_id)}" data-ttl-value="${Number(p.ttl_value) || 0}" data-ttl-unit="${escapeHtml(p.ttl_unit)}" data-min-delay-ms="${Number(p.min_delay_ms) || 0}" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[11px]">
                             ${escapeHtml(t('common.edit'))}
                         </button>
                     </td>
@@ -2568,7 +2580,92 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
             }
         }
 
+        let delegatedHandlersInitialized = false;
+        function setupDelegatedEventHandlers() {
+            if (delegatedHandlersInitialized) return;
+            delegatedHandlersInitialized = true;
+
+            const bind = (id, event, handler) => {
+                const el = document.getElementById(id);
+                if (el && typeof el.addEventListener === 'function') {
+                    el.addEventListener(event, handler);
+                }
+            };
+
+            bind('favorites-list', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action]') : null;
+                if (!target) return;
+                const action = target.dataset.action;
+                if (action === 'switch-tab') switchTab(target.dataset.tab);
+                else if (action === 'toggle-auto-dl') toggleAutoDownload(target.dataset.mangaId, target.dataset.autoDl === 'true');
+                else if (action === 'check-fav') checkSingleFavorite(target.dataset.mangaId);
+                else if (action === 'open-fav-dl') openFavoriteForDownload(target.dataset.mangaId, target.dataset.url);
+                else if (action === 'delete-fav') deleteFavorite(target.dataset.mangaId);
+            });
+
+            bind('favorites-list', 'change', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action="update-fav-format"]') : null;
+                if (target) updateFavoriteFormat(target.dataset.mangaId, target.value);
+            });
+
+            bind('modules-list', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action]') : null;
+                if (!target) return;
+                if (target.dataset.action === 'open-catalog') openCatalogForModule(target.dataset.moduleId);
+                else if (target.dataset.action === 'select-module-search') selectModuleForSearch(target.dataset.moduleId);
+            });
+
+            bind('catalog-table-body', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action="open-manga-direct"]') : null;
+                if (target) openMangaDirect(target.dataset.moduleId, target.dataset.url);
+            });
+
+            bind('alt-sources-list', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action="merge-with-source"]') : null;
+                if (target) mergeWithSource(target.dataset.moduleId, target.dataset.url, target.dataset.moduleName);
+            });
+
+            bind('chapters-list-container', 'change', (e) => {
+                if (e.target && e.target.classList && e.target.classList.contains('chapter-cb')) {
+                    updateSelectedCount();
+                }
+            });
+
+            bind('chapters-list-container', 'click', (e) => {
+                if (e.target && e.target.closest && e.target.closest('.chapter-external-link')) {
+                    e.stopPropagation();
+                }
+            });
+
+            bind('downloads-table-body', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action]') : null;
+                if (!target) return;
+                if (target.dataset.action === 'retry-download') retryDownload(target.dataset.downloadId);
+                else if (target.dataset.action === 'remove-download') removeDownload(target.dataset.downloadId);
+            });
+
+            bind('users-table-body', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action]') : null;
+                if (!target) return;
+                if (target.dataset.action === 'edit-user') openEditUserModal(target.dataset.userId);
+                else if (target.dataset.action === 'delete-user') deleteUser(target.dataset.userId, target.dataset.username);
+            });
+
+            bind('cache-policies-tbody', 'click', (e) => {
+                const target = e.target && e.target.closest ? e.target.closest('[data-action="edit-cache-policy"]') : null;
+                if (target) {
+                    editCachePolicy(
+                        target.dataset.moduleId,
+                        Number(target.dataset.ttlValue) || 0,
+                        target.dataset.ttlUnit,
+                        Number(target.dataset.minDelayMs) || 0
+                    );
+                }
+            });
+        }
+
         async function initApp() {
+            setupDelegatedEventHandlers();
             initI18n();
             let demoWasActive = false;
             try {

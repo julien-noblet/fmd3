@@ -40,6 +40,13 @@ spec:
             - name: FMD_NATS_URL
               value: {{ include "fmd3.natsUrl" . | quote }}
             {{- end }}
+            {{- if or .Values.worker.enabled .Values.worker.existingSecret .Values.worker.internalToken }}
+            - name: FMD_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.existingSecret | default (printf "%s-worker" (include "fmd3.fullname" .)) }}
+                  key: {{ .Values.worker.secretKey | default "internal-token" }}
+            {{- end }}
             {{- if or .Values.admin.existingSecret (and .Values.admin.username .Values.admin.password) }}
             - name: FMD_ADMIN_USER
               valueFrom:

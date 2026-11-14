@@ -16,9 +16,10 @@ use bindings::{
     xquery::register_xquery,
 };
 use fmd_net::HttpClient;
-use mlua::{Lua, Table};
-use std::path::Path;
+use mlua::{HookTriggers, Lua, Table, VmState};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -56,12 +57,136 @@ pub struct CatalogSyncProgress {
     pub items_found: usize,
 }
 
+const LUA_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const LUA_MAX_INSTRUCTIONS_PER_CALL: u64 = 50_000_000;
+const LUA_CALL_TIMEOUT_SECS: u64 = 30;
+const LUA_HOOK_STEP_INTERVAL: u32 = 10_000;
+
+struct ExecutionBudget {
+    deadline: Instant,
+    steps: u64,
+    max_steps: u64,
+}
+
+impl ExecutionBudget {
+    fn new() -> Self {
+        Self {
+            deadline: Instant::now() + Duration::from_secs(LUA_CALL_TIMEOUT_SECS),
+            steps: 0,
+            max_steps: LUA_MAX_INSTRUCTIONS_PER_CALL,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.deadline = Instant::now() + Duration::from_secs(LUA_CALL_TIMEOUT_SECS);
+        self.steps = 0;
+        self.max_steps = LUA_MAX_INSTRUCTIONS_PER_CALL;
+    }
+}
+
+fn normalize_lexical(path: &Path) -> std::result::Result<PathBuf, String> {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => out.push(p.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return Err("Path traversal escapes root".into());
+                }
+            }
+            Component::Normal(seg) => out.push(seg),
+        }
+    }
+    Ok(out)
+}
+
+fn canonicalize_with_tail(path: &Path) -> std::result::Result<PathBuf, String> {
+    let normalized = normalize_lexical(path)?;
+    let mut existing = normalized.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| "Unable to resolve path ancestor".to_string())?;
+        tail.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .ok_or_else(|| "Unable to resolve path parent".to_string())?;
+    }
+
+    let mut resolved = std::fs::canonicalize(existing)
+        .map_err(|e| format!("Failed to resolve path '{}': {}", path.display(), e))?;
+    for seg in tail.into_iter().rev() {
+        resolved.push(seg);
+    }
+    Ok(resolved)
+}
+
+fn sandbox_allowed_roots(write: bool) -> std::result::Result<Vec<PathBuf>, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("Failed to resolve current working directory: {}", e))?;
+    let userdata_dir = cwd.join("userdata");
+    if write {
+        std::fs::create_dir_all(&userdata_dir)
+            .map_err(|e| format!("Failed to prepare Lua userdata directory: {}", e))?;
+        let canonical_userdata = std::fs::canonicalize(&userdata_dir)
+            .map_err(|e| format!("Failed to canonicalize Lua userdata directory: {}", e))?;
+        return Ok(vec![canonical_userdata]);
+    }
+
+    let mut roots = Vec::new();
+    for candidate in [cwd.join("lua"), cwd.join("../../lua"), userdata_dir] {
+        if candidate.exists() {
+            if let Ok(canon) = std::fs::canonicalize(&candidate) {
+                roots.push(canon);
+            }
+        }
+    }
+    if roots.is_empty() {
+        return Err("No readable Lua sandbox root exists".into());
+    }
+    Ok(roots)
+}
+
+fn resolve_sandboxed_path(raw_path: &str, write: bool) -> std::result::Result<PathBuf, String> {
+    if raw_path.is_empty() || raw_path.contains('\0') {
+        return Err("Invalid empty or NUL-containing path".into());
+    }
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("Failed to resolve current working directory: {}", e))?;
+    let candidate = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else if !write
+        && !cwd.join("lua").exists()
+        && cwd.join("../../lua").exists()
+        && (raw_path.starts_with("lua/") || raw_path.starts_with("lua\\"))
+    {
+        cwd.join("../..").join(raw_path)
+    } else {
+        cwd.join(raw_path)
+    };
+    let resolved = canonicalize_with_tail(&candidate)?;
+    let roots = sandbox_allowed_roots(write)?;
+    if roots.iter().any(|root| resolved.starts_with(root)) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "Access to path '{}' is forbidden by Lua security sandbox",
+            raw_path
+        ))
+    }
+}
+
 pub struct LuaModuleEngine {
     lua: Lua,
     modules: Arc<Mutex<Vec<WebsiteModule>>>,
     http_client: HttpClient,
     links_items: Arc<Mutex<Vec<String>>>,
     names_items: Arc<Mutex<Vec<String>>>,
+    execution_budget: Arc<Mutex<ExecutionBudget>>,
 }
 
 impl LuaModuleEngine {
@@ -75,14 +200,47 @@ impl LuaModuleEngine {
         )
     }
 
+    fn reset_execution_budget(&self) {
+        if let Ok(mut budget) = self.execution_budget.lock() {
+            budget.reset();
+        }
+    }
+
     fn with_http_client(http_client: HttpClient) -> Result<Self> {
         let lua = Lua::new();
+        lua.set_memory_limit(LUA_MEMORY_LIMIT_BYTES)?;
+
+        let execution_budget = Arc::new(Mutex::new(ExecutionBudget::new()));
+        let hook_budget = execution_budget.clone();
+        lua.set_hook(
+            HookTriggers::new().every_nth_instruction(LUA_HOOK_STEP_INTERVAL),
+            move |_lua, _debug| {
+                let mut guard = hook_budget.lock().map_err(|_| {
+                    mlua::Error::RuntimeError("Lua execution budget poisoned".into())
+                })?;
+                guard.steps = guard.steps.saturating_add(LUA_HOOK_STEP_INTERVAL as u64);
+                if guard.steps > guard.max_steps || Instant::now() > guard.deadline {
+                    return Err(mlua::Error::RuntimeError(
+                        "Lua execution limit exceeded".into(),
+                    ));
+                }
+                Ok(VmState::Continue)
+            },
+        );
+
         let modules = Arc::new(Mutex::new(Vec::new()));
 
         // 1. Configure package.path and sandbox dangerous package capabilities
         let package: Table = lua.globals().get("package")?;
         let _ = package.set("loadlib", mlua::Value::Nil);
         let _ = package.set("cpath", "");
+        if let Ok(searchers) = package.get::<Table>("searchers") {
+            // Keep only preload (1) and Lua path loader (2); strip C library searchers.
+            let len = searchers.raw_len();
+            for idx in 3..=len {
+                let _ = searchers.raw_set(idx, mlua::Value::Nil);
+            }
+        }
 
         let current_path: String = package.get("path")?;
         let lua_paths = "lua/?.lua;lua/?/init.lua;lua/templates/?.lua;lua/utils/?.lua;../../lua/?.lua;../../lua/?/init.lua;../../lua/templates/?.lua;../../lua/utils/?.lua;?.lua";
@@ -91,48 +249,83 @@ impl LuaModuleEngine {
 
         // 2. Harden Lua Standard Environment (Defense-in-Depth Sandbox)
         let globals = lua.globals();
+        let _ = globals.set("load", mlua::Value::Nil);
+        let _ = globals.set("loadfile", mlua::Value::Nil);
+        let _ = globals.set("dofile", mlua::Value::Nil);
+        let _ = globals.set("loadstring", mlua::Value::Nil);
+
         if let Ok(os_tbl) = globals.get::<Table>("os") {
-            let _ = os_tbl.set("execute", mlua::Value::Nil);
-            let _ = os_tbl.set("remove", mlua::Value::Nil);
-            let _ = os_tbl.set("rename", mlua::Value::Nil);
-            let _ = os_tbl.set("exit", mlua::Value::Nil);
-            let _ = os_tbl.set("tmpname", mlua::Value::Nil);
-            let _ = os_tbl.set("getenv", mlua::Value::Nil);
-            let _ = os_tbl.set("setlocale", mlua::Value::Nil);
+            let safe_os = lua.create_table()?;
+            for key in ["time", "date", "difftime", "clock"] {
+                if let Ok(val) = os_tbl.get::<mlua::Value>(key) {
+                    let _ = safe_os.set(key, val);
+                }
+            }
+            let _ = globals.set("os", safe_os);
         }
 
         if let Ok(io_tbl) = globals.get::<Table>("io") {
             let _ = io_tbl.set("popen", mlua::Value::Nil);
             let _ = io_tbl.set("tmpfile", mlua::Value::Nil);
-        }
 
-        // Restrict io.open to safe project/module paths
-        if let Ok(Some(orig)) = lua
-            .load("return io and io.open")
-            .eval::<Option<mlua::Function>>()
-        {
-            let safe_open =
-                lua.create_function(move |_lua, (path, mode): (String, Option<String>)| {
-                    let p = path.to_lowercase();
-                    if p.starts_with("/etc")
-                        || p.starts_with("/proc")
-                        || p.starts_with("/sys")
-                        || p.starts_with("/dev")
-                        || p.starts_with("/root")
-                        || p.contains(".ssh")
-                        || p.contains(".env")
-                        || p.contains("id_rsa")
-                        || p.contains("shadow")
-                    {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "Access to path '{}' is forbidden by Lua security sandbox",
-                            path
-                        )));
-                    }
-                    orig.call::<mlua::Value>((path, mode))
-                })?;
-            if let Ok(io_tbl) = globals.get::<Table>("io") {
+            if let Ok(orig_open) = io_tbl.get::<mlua::Function>("open") {
+                let safe_open =
+                    lua.create_function(move |_lua, (path, mode): (String, Option<String>)| {
+                        let mode_str = mode.as_deref().unwrap_or("r");
+                        let write = mode_str.contains('w')
+                            || mode_str.contains('a')
+                            || mode_str.contains('+');
+                        let resolved = resolve_sandboxed_path(&path, write)
+                            .map_err(mlua::Error::RuntimeError)?;
+                        orig_open
+                            .call::<mlua::Value>((resolved.to_string_lossy().into_owned(), mode))
+                    })?;
                 let _ = io_tbl.set("open", safe_open);
+            }
+
+            if let Ok(orig_lines) = io_tbl.get::<mlua::Function>("lines") {
+                let safe_lines = lua.create_function(move |lua, args: mlua::MultiValue| {
+                    let mut out_args = args.into_vec();
+                    if let Some(mlua::Value::String(path)) = out_args.first() {
+                        let raw = path.to_str()?.to_string();
+                        let resolved = resolve_sandboxed_path(&raw, false)
+                            .map_err(mlua::Error::RuntimeError)?;
+                        let s = lua.create_string(resolved.to_string_lossy().as_bytes())?;
+                        out_args[0] = mlua::Value::String(s);
+                    }
+                    orig_lines.call::<mlua::Value>(mlua::MultiValue::from_vec(out_args))
+                })?;
+                let _ = io_tbl.set("lines", safe_lines);
+            }
+
+            if let Ok(orig_input) = io_tbl.get::<mlua::Function>("input") {
+                let safe_input =
+                    lua.create_function(move |lua, arg: Option<mlua::Value>| match arg {
+                        Some(mlua::Value::String(path)) => {
+                            let raw = path.to_str()?.to_string();
+                            let resolved = resolve_sandboxed_path(&raw, false)
+                                .map_err(mlua::Error::RuntimeError)?;
+                            let s = lua.create_string(resolved.to_string_lossy().as_bytes())?;
+                            orig_input.call::<mlua::Value>(Some(mlua::Value::String(s)))
+                        }
+                        other => orig_input.call::<mlua::Value>(other),
+                    })?;
+                let _ = io_tbl.set("input", safe_input);
+            }
+
+            if let Ok(orig_output) = io_tbl.get::<mlua::Function>("output") {
+                let safe_output =
+                    lua.create_function(move |lua, arg: Option<mlua::Value>| match arg {
+                        Some(mlua::Value::String(path)) => {
+                            let raw = path.to_str()?.to_string();
+                            let resolved = resolve_sandboxed_path(&raw, true)
+                                .map_err(mlua::Error::RuntimeError)?;
+                            let s = lua.create_string(resolved.to_string_lossy().as_bytes())?;
+                            orig_output.call::<mlua::Value>(Some(mlua::Value::String(s)))
+                        }
+                        other => orig_output.call::<mlua::Value>(other),
+                    })?;
+                let _ = io_tbl.set("output", safe_output);
             }
         }
 
@@ -348,10 +541,12 @@ impl LuaModuleEngine {
             http_client,
             links_items,
             names_items,
+            execution_budget,
         })
     }
 
     pub fn load_file<P: AsRef<Path>>(&self, path: P) -> Result<Option<WebsiteModule>> {
+        self.reset_execution_budget();
         let path_ref = path.as_ref();
         let mut content = std::fs::read_to_string(path_ref)?;
         // Strip UTF-8 BOM if present
@@ -450,6 +645,7 @@ impl LuaModuleEngine {
         globals.set("MANGAINFO", mangainfo_table)?;
 
         // Call OnGetInfo
+        self.reset_execution_budget();
         if let Ok(info_fn) = globals.get::<mlua::Function>(&*on_get_info) {
             let _: mlua::Value = info_fn.call(())?;
         }
@@ -524,6 +720,7 @@ impl LuaModuleEngine {
         globals.set("TASK", task_table)?;
 
         // Execute OnGetPageNumber
+        self.reset_execution_budget();
         if let Ok(page_fn) = globals.get::<mlua::Function>(&*on_get_page_number) {
             let _: mlua::Value = page_fn.call(())?;
         }
@@ -573,6 +770,7 @@ impl LuaModuleEngine {
         if total_count > 0 {
             if let Ok(img_fn) = globals.get::<mlua::Function>(&*on_get_image_url) {
                 for i in 0..total_count {
+                    self.reset_execution_budget();
                     globals.set("WORKID", i as i64)?;
                     let _: mlua::Value = img_fn.call(())?;
                 }
@@ -611,6 +809,7 @@ impl LuaModuleEngine {
 
         if let Some(on_before) = module.on_before_download_image {
             if let Ok(hook_fn) = globals.get::<mlua::Function>(&*on_before) {
+                self.reset_execution_budget();
                 let _: mlua::Value = hook_fn.call(())?;
             }
         }
@@ -651,6 +850,7 @@ impl LuaModuleEngine {
         globals.set("WorkId", work_id as i64)?;
 
         if let Ok(hook_fn) = globals.get::<mlua::Function>(&*on_download) {
+            self.reset_execution_budget();
             let res: mlua::Value = hook_fn.call(())?;
             match res {
                 mlua::Value::Boolean(true) => {
@@ -713,6 +913,7 @@ impl LuaModuleEngine {
         }
 
         if let Ok(fn_get) = globals.get::<mlua::Function>(&*on_get_name_and_link) {
+            self.reset_execution_budget();
             let _: mlua::Value = fn_get.call(())?;
         }
 
@@ -787,6 +988,7 @@ impl LuaModuleEngine {
             let mut known_total_pages = None;
             if let Some(ref dir_fn_name) = module.on_get_directory_page_number {
                 if let Ok(dir_fn) = globals.get::<mlua::Function>(&**dir_fn_name) {
+                    self.reset_execution_budget();
                     if dir_fn.call::<()>(()).is_ok() {
                         let p: i64 = globals.get("PAGENUMBER").unwrap_or(0);
                         if p > 0 {
@@ -818,6 +1020,7 @@ impl LuaModuleEngine {
                 }
 
                 if let Ok(fn_get) = globals.get::<mlua::Function>(&*on_get_name_and_link) {
+                    self.reset_execution_budget();
                     let _: mlua::Value = fn_get.call(())?;
                 }
 
@@ -1157,47 +1360,109 @@ mod tests {
         let engine = LuaModuleEngine::new().expect("Failed to create LuaModuleEngine");
         let lua = &engine.lua;
 
-        // Verify os.execute is disabled
-        let os_exec: mlua::Value = lua.load("return os and os.execute").eval().unwrap();
-        assert!(
-            os_exec.is_nil(),
-            "os.execute should be nil in hardened sandbox"
-        );
+        // Verify dangerous os/io/global primitives are disabled
+        for expr in [
+            "return os and os.execute",
+            "return os and os.remove",
+            "return os and os.getenv",
+            "return io and io.popen",
+            "return io and io.tmpfile",
+            "return package and package.loadlib",
+            "return load",
+            "return loadfile",
+            "return dofile",
+            "return loadstring",
+            "local pb = require('pb'); return pb.loadfile",
+            "return package and package.searchers and package.searchers[3]",
+            "return package and package.searchers and package.searchers[4]",
+        ] {
+            let val: mlua::Value = lua.load(expr).eval().unwrap();
+            assert!(val.is_nil(), "Expression '{}' must evaluate to nil", expr);
+        }
 
-        // Verify os.remove is disabled
-        let os_rm: mlua::Value = lua.load("return os and os.remove").eval().unwrap();
-        assert!(
-            os_rm.is_nil(),
-            "os.remove should be nil in hardened sandbox"
-        );
-
-        // Verify io.popen is disabled
-        let io_popen: mlua::Value = lua.load("return io and io.popen").eval().unwrap();
-        assert!(
-            io_popen.is_nil(),
-            "io.popen should be nil in hardened sandbox"
-        );
-
-        // Verify package.loadlib is disabled
-        let pkg_loadlib: mlua::Value = lua
-            .load("return package and package.loadlib")
-            .eval()
-            .unwrap();
-        assert!(
-            pkg_loadlib.is_nil(),
-            "package.loadlib should be nil in hardened sandbox"
-        );
-
-        // Verify safe os.time and os.date still function normally
+        // Verify safe os.time still functions normally
         let time_val: i64 = lua.load("return os.time()").eval().unwrap();
         assert!(time_val > 0, "os.time() should return valid timestamp");
 
-        // Verify access to /etc/passwd is blocked by safe io.open
-        let open_res: mlua::Result<mlua::Value> =
-            lua.load("return io.open('/etc/passwd', 'r')").eval();
+        // Verify filesystem escapes across io.open / io.lines / io.input / io.output are blocked
+        for expr in [
+            "return io.open('/etc/passwd', 'r')",
+            "return io.open('//etc/passwd', 'r')",
+            "return io.open('/./etc/passwd', 'r')",
+            "return io.open('../../Cargo.toml', 'r')",
+            "return io.open('lua/modules/sandbox_write_test.lua', 'w')",
+            "return io.lines('/etc/passwd')",
+            "return io.input('/etc/passwd')",
+            "return io.output('lua/modules/sandbox_write_test.lua')",
+        ] {
+            let res: mlua::Result<mlua::Value> = lua.load(expr).eval();
+            assert!(res.is_err(), "Sandbox must block '{}'", expr);
+        }
+
+        // Verify legitimate read inside lua/ works (e.g., MangaPlus.proto)
+        let proto_ok: bool = lua
+            .load(
+                r#"
+                local f = io.open('lua/modules/MangaPlus.proto', 'rb') or io.open('../../lua/modules/MangaPlus.proto', 'rb')
+                if not f then return false end
+                local content = f:read('*all')
+                f:close()
+                return content ~= nil and #content > 0
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(proto_ok, "Legitimate lua/modules/*.proto read must succeed");
+
+        // Verify legitimate userdata/ write + read workflow (MangaDex mapping pattern)
+        let userdata_dir = std::env::current_dir().unwrap().join("userdata");
+        let userdata_existed = userdata_dir.exists();
+        let mapping_rel = "userdata/_sandbox_test_mapping.txt";
+        let mapping_abs = userdata_dir.join("_sandbox_test_mapping.txt");
+        let rw_ok: bool = lua
+            .load(format!(
+                r#"
+                local wf = assert(io.open('{p}', 'a'))
+                io.output(wf)
+                io.write('123;test\n')
+                wf:close()
+                local lines = {{}}
+                for line in io.lines('{p}') do
+                    table.insert(lines, line)
+                end
+                return #lines >= 1 and lines[1] == '123;test'
+                "#,
+                p = mapping_rel
+            ))
+            .eval()
+            .unwrap();
+        let _ = std::fs::remove_file(&mapping_abs);
+        if !userdata_existed {
+            let _ = std::fs::remove_dir(&userdata_dir);
+        }
         assert!(
-            open_res.is_err(),
-            "Access to /etc/passwd should be denied by sandbox"
+            rw_ok,
+            "Legitimate userdata/ write & io.lines read must succeed"
+        );
+    }
+
+    #[test]
+    fn test_lua_and_js_execution_limits() {
+        let engine = LuaModuleEngine::new().expect("Failed to create LuaModuleEngine");
+        engine.reset_execution_budget();
+
+        let lua_loop: mlua::Result<mlua::Value> = engine.lua.load("while true do end").eval();
+        assert!(lua_loop.is_err(), "Infinite Lua loop must abort");
+
+        let js_loop: String = engine
+            .lua
+            .load(r#"return duktape.ExecJS("while (true) {}")"#)
+            .eval()
+            .unwrap();
+        assert!(
+            js_loop.starts_with("Error:"),
+            "Infinite JS loop must return loop-limit error, got: {}",
+            js_loop
         );
     }
 }

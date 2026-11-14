@@ -12,6 +12,8 @@ pub fn register_pb(lua: &Lua) -> LuaResult<()> {
     unsafe {
         let open_fn = lua.create_c_function(c_luaopen_pb)?;
         let pb_table: Table = open_fn.call(())?;
+        // Remove raw C fopen helper (Lpb_loadfile) so file reads cannot bypass the Lua io sandbox.
+        pb_table.set("loadfile", mlua::Value::Nil)?;
 
         let package: Table = lua.globals().get("package")?;
         let preload: Table = package.get("preload")?;

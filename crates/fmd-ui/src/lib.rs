@@ -428,4 +428,84 @@ process.stdin.on('end', async () => {
         assert!(settings.contains("setting-download-dir"));
         assert!(settings.contains("btn-save-settings"));
     }
+
+    #[test]
+    fn test_client_script_no_dom_xss_sinks() {
+        let script = client_script::render("");
+        assert!(script.contains("function safeHttpUrl(rawUrl)"));
+        assert!(script.contains("setupDelegatedEventHandlers"));
+        for line in script.lines() {
+            if line.contains("href=\"${") {
+                assert!(
+                    line.contains("href=\"${escapeHtml(safeHttpUrl("),
+                    "Dynamic href values must be filtered through safeHttpUrl: {}",
+                    line
+                );
+            }
+            if line.contains("${escapeHtml(") {
+                assert!(
+                    !line.contains("onclick=") && !line.contains("onchange="),
+                    "Dynamic values must not be interpolated into inline event handlers: {}",
+                    line
+                );
+            }
+        }
+
+        if let Ok(mut child) = std::process::Command::new("node")
+            .arg("-e")
+            .arg(
+                r#"
+const vm = require('vm');
+let code = '';
+process.stdin.on('data', d => code += d);
+process.stdin.on('end', () => {
+    const sandbox = {
+        window: {},
+        document: { getElementById: () => null, querySelectorAll: () => [], documentElement: {} },
+        navigator: { language: 'en' },
+        localStorage: { getItem: () => null, setItem: () => null },
+        fetch: async () => ({ status: 401, ok: false, json: async () => ({}) }),
+        WebSocket: class { static OPEN = 1; constructor() { this.readyState = 1; } },
+        URL,
+        console,
+        setTimeout: () => {},
+        clearTimeout: () => {},
+        history: { replaceState: () => {}, pushState: () => {} },
+        addEventListener: () => {},
+        location: { protocol: 'https:', host: 'example.com', origin: 'https://example.com', hash: '' },
+        LOCALES: { en: {}, fr: {} },
+        LANGUAGES: []
+    };
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    if (sandbox.safeHttpUrl('javascript:alert(1)') !== '#') {
+        throw new Error('javascript: URI must be neutralized');
+    }
+    if (sandbox.safeHttpUrl('data:text/html,<script>alert(1)</script>') !== '#') {
+        throw new Error('data: URI must be neutralized');
+    }
+    if (sandbox.safeHttpUrl('https://mangadex.org/title/1') !== 'https://mangadex.org/title/1') {
+        throw new Error('https: URI should be preserved');
+    }
+    process.exit(0);
+});
+"#,
+            )
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(script.as_bytes()).unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "XSS sanitizer JS test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

@@ -28,6 +28,12 @@ worker:
   enabled: true
   replicaCount: 2
   concurrency: 2
+  # Shared internal authentication token for server <-> worker callbacks.
+  # Either reference an existing Secret, set internalToken explicitly,
+  # or leave empty to auto-generate a cluster-local Secret.
+  existingSecret: ""
+  secretKey: "internal-token"
+  internalToken: ""
   resources:
     limits:
       cpu: "2000m"

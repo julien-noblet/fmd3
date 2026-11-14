@@ -402,8 +402,26 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     };
 
     let login_rate_limiter = Arc::new(auth::LoginRateLimiter::new());
-    let internal_worker_token = std::env::var("FMD_INTERNAL_TOKEN")
-        .unwrap_or_else(|_| "fmd_internal_worker_secret_key_san".to_string());
+    let internal_worker_token = match std::env::var("FMD_INTERNAL_TOKEN") {
+        Ok(val) => {
+            let trimmed = val.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("FMD_INTERNAL_TOKEN cannot be empty when set");
+            }
+            trimmed
+        }
+        Err(_) => {
+            if std::env::var("FMD_NATS_URL")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
+                warn!(
+                    "FMD_NATS_URL is set without FMD_INTERNAL_TOKEN; generating ephemeral server token so external workers cannot authenticate without an explicit shared secret."
+                );
+            }
+            fmd_core::auth::generate_secure_token()
+        }
+    };
 
     let state = AppState {
         db,
@@ -1113,12 +1131,26 @@ async fn add_security_headers(
     response
 }
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn verify_worker_token(
     headers: &axum::http::HeaderMap,
     expected_token: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     if expected_token.is_empty() {
-        return Ok(());
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Accès refusé : jeton interne worker non configuré".into(),
+        ));
     }
     let token = headers
         .get("x-fmd-internal-token")
@@ -1131,7 +1163,7 @@ fn verify_worker_token(
         });
 
     if let Some(t) = token {
-        if t.trim() == expected_token {
+        if constant_time_eq(t.trim().as_bytes(), expected_token.as_bytes()) {
             return Ok(());
         }
     }
@@ -3247,6 +3279,8 @@ mod tests {
         assert!(verify_worker_token(&valid_headers, "secret_token_123").is_ok());
         assert!(verify_worker_token(&invalid_headers, "secret_token_123").is_err());
         assert!(verify_worker_token(&empty_headers, "secret_token_123").is_err());
+        assert!(verify_worker_token(&empty_headers, "").is_err());
+        assert!(verify_worker_token(&valid_headers, "").is_err());
     }
 
     #[tokio::test]

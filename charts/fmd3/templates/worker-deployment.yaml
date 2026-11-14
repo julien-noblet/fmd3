@@ -36,6 +36,11 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.worker.env.RUST_LOG | quote }}
+            - name: FMD_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.existingSecret | default (printf "%s-worker" (include "fmd3.fullname" .)) }}
+                  key: {{ .Values.worker.secretKey | default "internal-token" }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:
