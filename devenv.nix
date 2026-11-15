@@ -5,6 +5,7 @@
     RUST_BACKTRACE = 1;
     RUST_LOG = "info";
     FMD_NATS_URL = "nats://${config.services.nats.host}:${toString config.processes.nats.ports.main.value}";
+    FMD_SERVER_URL = "http://127.0.0.1:8089";
     FMD_INTERNAL_TOKEN = "dev-internal-token"; # dev-only local token
   };
 
@@ -44,9 +45,15 @@
       cargo clippy --workspace --all-targets -- -D warnings
       cargo test --workspace
     '';
-    serve.exec = ''cargo run --bin fmd -- serve "$@"'';
+    serve.exec = ''
+      [[ "$*" == *--bind* || "$*" == *-b* ]] || set -- --bind 127.0.0.1:8089 "$@"
+      cargo run --bin fmd -- serve "$@"
+    '';
     worker.exec = ''cargo run --bin fmd -- worker "$@"'';
-    demo.exec = ''FMD_DEMO_MODE=true cargo run --bin fmd -- serve "$@"'';
+    demo.exec = ''
+      [[ "$*" == *--bind* || "$*" == *-b* ]] || set -- --bind 127.0.0.1:8089 "$@"
+      FMD_DEMO_MODE=true cargo run --bin fmd -- serve "$@"
+    '';
   };
 
   enterTest = ''
