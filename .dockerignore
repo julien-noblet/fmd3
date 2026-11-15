@@ -1,5 +1,5 @@
 target/
 data/
 downloads/
-.direnv/
+.devenv/
 .git/

@@ -30,9 +30,9 @@ baseunits/revision.inc
 Cargo.lock
 **/*.rs.bk
 
-# Direnv & Nix
-.direnv/
-.envrc.cache
+# Nix & devenv
+.devenv*
+.pre-commit-config.yaml
 result
 result-*
 

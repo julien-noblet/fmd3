@@ -97,13 +97,13 @@ cargo build --release --bin fmd
 
 ---
 
-## 4. Reproducible Environment with Nix Flake
+## 4. Reproducible Environment with devenv
 
 If you use Nix or NixOS, enter an isolated development shell with all dependencies, compilers, and libraries pre-configured:
 
 ```bash
-# Enter nix environment
-nix develop
+# Enter devenv environment
+devenv shell
 
 # Run the test suite
 cargo test --workspace

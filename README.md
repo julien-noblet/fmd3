@@ -40,7 +40,7 @@ A high-performance, headless daemon, CLI, and modern Web UI rewrite known as **F
 - **☸️ Cloud-Native & Homelab Ready**
   - Ready-to-deploy **Docker Compose** stack.
   - Complete **Helm Chart** (`charts/fmd3`) with configurable PVCs, Ingress, and auto-scaling workers.
-  - Deterministic Nix Flake development environment (`nix develop`).
+  - Deterministic [devenv](https://devenv.sh/) development environment (`devenv shell`).
 
 ---
 
@@ -55,11 +55,11 @@ Open your browser at **http://localhost:8088** to access the Web UI.
 
 ### 2. Building from Source (Rust Cargo)
 
-Make sure you have Rust 1.80+ or use Nix Flake:
+Make sure you have Rust 1.80+ or use `devenv`:
 
 ```bash
-# Enter nix shell (optional)
-nix develop
+# Enter devenv shell (optional)
+devenv shell
 
 # Build and start server
 cargo run --release --bin fmd -- serve --port 8088 --bind 0.0.0.0
