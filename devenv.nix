@@ -46,7 +46,7 @@
     '';
     serve.exec = ''cargo run --bin fmd -- serve "$@"'';
     worker.exec = ''cargo run --bin fmd -- worker "$@"'';
-    demo.exec = ''FMD_DEMO_ENABLED=true cargo run --bin fmd -- serve "$@"'';
+    demo.exec = ''FMD_DEMO_MODE=true cargo run --bin fmd -- serve "$@"'';
   };
 
   enterTest = ''
