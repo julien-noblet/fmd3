@@ -1,7 +1,12 @@
-{ pkgs, ... }:
+{ config, pkgs, ... }:
 
 {
-  env.RUST_BACKTRACE = 1;
+  env = {
+    RUST_BACKTRACE = 1;
+    RUST_LOG = "info";
+    FMD_NATS_URL = "nats://${config.services.nats.host}:${toString config.processes.nats.ports.main.value}";
+    FMD_INTERNAL_TOKEN = "dev-internal-token"; # dev-only local token
+  };
 
   packages = with pkgs; [
     pkg-config
@@ -11,7 +16,10 @@
 
   languages.rust.enable = true;
 
-  services.nats.enable = true;
+  services.nats = {
+    enable = true;
+    jetstream.enable = true;
+  };
 
   treefmt = {
     enable = true;
@@ -29,12 +37,17 @@
     clippy.enable = true;
   };
 
-  scripts.check.exec = ''
-    set -euo pipefail
-    cargo fmt --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
-  '';
+  scripts = {
+    check.exec = ''
+      set -euo pipefail
+      cargo fmt --check
+      cargo clippy --workspace --all-targets -- -D warnings
+      cargo test --workspace
+    '';
+    serve.exec = ''cargo run --bin fmd -- serve "$@"'';
+    worker.exec = ''cargo run --bin fmd -- worker "$@"'';
+    demo.exec = ''FMD_DEMO_ENABLED=true cargo run --bin fmd -- serve "$@"'';
+  };
 
   enterTest = ''
     check
