@@ -19,22 +19,22 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v7
 
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
         with:
-          components: rustfmt, clippy
+          name: devenv
+
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
 
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Check Formatting
-        run: cargo fmt --check
-
-      - name: Clippy Linter
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run Hermetic Workspace Tests
-        run: cargo test --workspace --verbose
+      - name: Run Checks & Tests
+        run: devenv test
 
   docker-build:
     name: Build & Publish Docker Multi-Arch (amd64 / arm64)
