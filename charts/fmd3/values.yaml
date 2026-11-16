@@ -23,6 +23,10 @@ server:
     RUST_LOG: "info"
     FMD_DEMO_MODE: "false"
     DEMO_SLOTS: "10"
+    # Optional runtime overrides (when set, they override DB/UI settings in both normal and demo modes):
+    # FMD_MIN_DELAY_MS: "1000"
+    # FMD_CHECK_INTERVAL_HOURS: "1"
+    # FMD_CATALOG_RESYNC_DAYS: "7"
 
 worker:
   enabled: true

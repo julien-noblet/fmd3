@@ -36,6 +36,18 @@ spec:
               value: {{ .Values.server.env.FMD_DEMO_MODE | quote }}
             - name: DEMO_SLOTS
               value: {{ .Values.server.env.DEMO_SLOTS | quote }}
+            {{- if and (not (kindIs "invalid" .Values.server.env.FMD_MIN_DELAY_MS)) (ne (printf "%v" .Values.server.env.FMD_MIN_DELAY_MS) "") }}
+            - name: FMD_MIN_DELAY_MS
+              value: {{ .Values.server.env.FMD_MIN_DELAY_MS | quote }}
+            {{- end }}
+            {{- if and (not (kindIs "invalid" .Values.server.env.FMD_CHECK_INTERVAL_HOURS)) (ne (printf "%v" .Values.server.env.FMD_CHECK_INTERVAL_HOURS) "") }}
+            - name: FMD_CHECK_INTERVAL_HOURS
+              value: {{ .Values.server.env.FMD_CHECK_INTERVAL_HOURS | quote }}
+            {{- end }}
+            {{- if and (not (kindIs "invalid" .Values.server.env.FMD_CATALOG_RESYNC_DAYS)) (ne (printf "%v" .Values.server.env.FMD_CATALOG_RESYNC_DAYS) "") }}
+            - name: FMD_CATALOG_RESYNC_DAYS
+              value: {{ .Values.server.env.FMD_CATALOG_RESYNC_DAYS | quote }}
+            {{- end }}
             {{- if or .Values.nats.enabled .Values.nats.customUrl }}
             - name: FMD_NATS_URL
               value: {{ include "fmd3.natsUrl" . | quote }}

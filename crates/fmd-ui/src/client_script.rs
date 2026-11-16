@@ -395,12 +395,29 @@ pub const CLIENT_SCRIPT: &str = r#"        // ==================================
                     const el = document.getElementById(id);
                     if (el) el.value = val;
                 };
+                const setSelectVal = (id, val, suffix) => {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    const strVal = String(val);
+                    const hasOption = Array.from(el.options || []).some(o => String(o.value) === strVal);
+                    if (!hasOption && typeof document.createElement === 'function') {
+                        const opt = document.createElement('option');
+                        opt.value = strVal;
+                        opt.textContent = `${strVal} ${suffix}`;
+                        el.appendChild(opt);
+                    }
+                    el.value = strVal;
+                    if (demoMode) {
+                        el.disabled = true;
+                        el.classList.add('opacity-60', 'cursor-not-allowed');
+                    }
+                };
                 setVal('setting-download-dir', s.download_dir || 'downloads');
                 setVal('setting-default-format', s.default_format || 'CBZ');
                 setVal('setting-naming-template', s.naming_template || '{manga}/{chapter}');
                 setVal('setting-flaresolverr-url', s.flaresolverr_url || '');
-                setVal('setting-check-interval', s.check_interval_hours || 1);
-                setVal('setting-catalog-resync', s.catalog_resync_days || 7);
+                setSelectVal('setting-check-interval', s.check_interval_hours || 1, 'h');
+                setSelectVal('setting-catalog-resync', s.catalog_resync_days || 7, 'd');
                 updateNamingPreview();
             } catch (e) {
                 console.error("Error loading settings:", e);

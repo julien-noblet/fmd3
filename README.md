@@ -98,6 +98,16 @@ helm upgrade --install fmd3 ./charts/fmd3 \
   --set worker.enabled=false
 ```
 
+### Scrape & Refresh Environment Variables
+
+You can enforce server-wide defaults/overrides for scraping delays and background refresh intervals via environment variables (in both normal and demo modes, these take precedence over database/UI values; in demo mode, interval settings cannot be modified by visitors):
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `FMD_MIN_DELAY_MS` | `1000` | Minimum anti-ban delay in milliseconds between consecutive requests to the same module (`>= 0`). |
+| `FMD_CHECK_INTERVAL_HOURS` | `1` | Interval in hours for checking tracked favorites (`>= 1`). |
+| `FMD_CATALOG_RESYNC_DAYS` | `7` | Interval in days for scheduled catalog resynchronization (`>= 1`). |
+
 ---
 
 ## 💻 CLI Commands
