@@ -44,11 +44,22 @@ pub struct AppState {
     pub throttler: auth::DomainThrottler,
     pub login_rate_limiter: Arc<auth::LoginRateLimiter>,
     pub internal_worker_token: String,
+    pub env_overrides: fmd_core::RuntimeEnvOverrides,
 }
 
 impl AppState {
     fn cache_db(&self) -> &Database {
         self.shared_cache.as_ref().unwrap_or(&self.db)
+    }
+
+    pub async fn effective_settings(&self) -> fmd_core::Result<fmd_core::AppSettings> {
+        let mut settings = self.db.get_settings().await?;
+        self.env_overrides.apply_to_settings(&mut settings);
+        Ok(settings)
+    }
+
+    pub fn effective_min_delay_ms(&self, policy_delay_ms: u64) -> u64 {
+        self.env_overrides.effective_min_delay_ms(policy_delay_ms)
     }
 }
 
@@ -123,6 +134,13 @@ impl CatalogSyncManager {
         let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let mut guard = self.active_cancel.lock().await;
+            if guard.is_some() {
+                warn!(
+                    "A catalog sync is already running; skipping {}",
+                    module.name
+                );
+                return;
+            }
             *guard = Some((module.id.clone(), cancel_token.clone()));
             let mut info_guard = self.active_info.lock().await;
             *info_guard = Some(ActiveSyncInfo {
@@ -334,8 +352,10 @@ async fn handle_download_failure(
 
 pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     let base_path = base_path::from_env()?;
+    let env_overrides =
+        fmd_core::RuntimeEnvOverrides::from_env().map_err(|err| anyhow::anyhow!("{err}"))?;
     if let Some(config) = demo::DemoConfig::from_env()? {
-        return demo::run_server(addr, config, &base_path).await;
+        return demo::run_server(addr, config, &base_path, env_overrides).await;
     }
     let db = Database::new("data/fmd.db").await?;
 
@@ -395,8 +415,26 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     };
 
     let login_rate_limiter = Arc::new(auth::LoginRateLimiter::new());
-    let internal_worker_token = std::env::var("FMD_INTERNAL_TOKEN")
-        .unwrap_or_else(|_| "fmd_internal_worker_secret_key_san".to_string());
+    let internal_worker_token = match std::env::var("FMD_INTERNAL_TOKEN") {
+        Ok(val) => {
+            let trimmed = val.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("FMD_INTERNAL_TOKEN cannot be empty when set");
+            }
+            trimmed
+        }
+        Err(_) => {
+            if std::env::var("FMD_NATS_URL")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
+                warn!(
+                    "FMD_NATS_URL is set without FMD_INTERNAL_TOKEN; generating ephemeral server token so external workers cannot authenticate without an explicit shared secret."
+                );
+            }
+            fmd_core::auth::generate_secure_token()
+        }
+    };
 
     let state = AppState {
         db,
@@ -411,9 +449,10 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         throttler,
         login_rate_limiter,
         internal_worker_token,
+        env_overrides,
     };
 
-    // Spawn background task scheduler (weekly auto-resync and chapter checking)
+    // Spawn background task scheduler (auto-resync and chapter checking)
     let bg_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Every hour
@@ -421,29 +460,33 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             hour_ticks = hour_ticks.wrapping_add(1);
+            let settings = bg_state.effective_settings().await.unwrap_or_default();
 
-            // 1. Hourly check on enabled favorites with auto_download
-            if let Ok(favorites) = bg_state.db.list_favorites_with_stats().await {
-                for fav in favorites {
-                    if fav.enabled && fav.auto_download {
-                        info!(
-                            "Scheduler: checking auto-download updates for favorite '{}'...",
-                            fav.title
-                        );
-                        let _ = check_favorite_internal(&bg_state, &fav).await;
+            // 1. Check enabled favorites with auto_download on configured interval
+            if hour_ticks.is_multiple_of(settings.check_interval_hours.max(1)) {
+                if let Ok(favorites) = bg_state.db.list_favorites_with_stats().await {
+                    for fav in favorites {
+                        if fav.enabled && fav.auto_download {
+                            info!(
+                                "Scheduler: checking auto-download updates for favorite '{}'...",
+                                fav.title
+                            );
+                            let _ = check_favorite_internal(&bg_state, &fav).await;
+                        }
                     }
                 }
             }
 
-            // 2. Weekly auto-resync check (every 6 hours)
+            // 2. Auto-resync check (every 6 hours)
             if hour_ticks.is_multiple_of(6) {
                 info!("Background scheduler tick: checking modules for scheduled sync...");
                 if !bg_state.sync_manager.is_syncing().await {
                     if let Ok(statuses) = bg_state.db.list_all_sync_statuses().await {
                         let now = chrono::Utc::now();
+                        let resync_days = settings.catalog_resync_days.max(1) as i64;
                         for st in statuses {
                             let should_sync = match st.last_synced_at {
-                                Some(t) => (now - t).num_days() >= 7,
+                                Some(t) => (now - t).num_days() >= resync_days,
                                 None => false,
                             };
                             if should_sync && st.status != "Syncing" {
@@ -1106,12 +1149,26 @@ async fn add_security_headers(
     response
 }
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn verify_worker_token(
     headers: &axum::http::HeaderMap,
     expected_token: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     if expected_token.is_empty() {
-        return Ok(());
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Accès refusé : jeton interne worker non configuré".into(),
+        ));
     }
     let token = headers
         .get("x-fmd-internal-token")
@@ -1124,7 +1181,7 @@ fn verify_worker_token(
         });
 
     if let Some(t) = token {
-        if t.trim() == expected_token {
+        if constant_time_eq(t.trim().as_bytes(), expected_token.as_bytes()) {
             return Ok(());
         }
     }
@@ -1219,11 +1276,23 @@ async fn load_manga_info(
     allow_force: bool,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let manga_id = format!("{}:{}", req.module_id, req.url);
+    if state.shared_cache.is_some()
+        && (req.url.contains("://") || req.url.starts_with("//"))
+        && !fmd_net::is_public_url(&req.url)
+    {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Forbidden destination".into(),
+        ));
+    }
 
     // 1. Check cache if not forcing refresh
     if !allow_force {
         if let Ok(Some(cached)) = state.cache_db().get_manga_cache(&manga_id).await {
-            if !cached.is_expired() {
+            if !cached.is_expired()
+                && (state.shared_cache.is_none()
+                    || chrono::Utc::now() < cached.cached_at + chrono::Duration::hours(24))
+            {
                 if let (Ok(mut info), Ok(chapters)) = (
                     serde_json::from_str::<MangaInfoResult>(&cached.metadata_json),
                     serde_json::from_str::<Vec<fmd_engine_lua::ChapterItem>>(&cached.chapters_json),
@@ -1250,13 +1319,6 @@ async fn load_manga_info(
         }
     }
 
-    if state.shared_cache.is_some() {
-        return Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "Live scraping is unavailable in demo mode; manga is not in the public cache".into(),
-        ));
-    }
-
     // 2. Fetch fresh from engine with rate limiting
     let policy = state
         .cache_db()
@@ -1266,7 +1328,10 @@ async fn load_manga_info(
 
     state
         .throttler
-        .throttle(&req.module_id, policy.min_delay_ms)
+        .throttle(
+            &req.module_id,
+            state.effective_min_delay_ms(policy.min_delay_ms),
+        )
         .await;
 
     let module = state
@@ -1286,7 +1351,11 @@ async fn load_manga_info(
             save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
 
             let now = chrono::Utc::now();
-            let expires_at = policy.calculate_expiration(now);
+            let expires_at = if state.shared_cache.is_some() {
+                now + chrono::Duration::hours(24)
+            } else {
+                policy.calculate_expiration(now)
+            };
             let metadata_json = serde_json::to_string(&info).unwrap_or_default();
             let chapters_json = serde_json::to_string(&info.chapters).unwrap_or_default();
 
@@ -2556,8 +2625,37 @@ async fn trigger_catalog_sync(
             )
         })?;
 
+    if state.shared_cache.is_some() {
+        let status = state
+            .cache_db()
+            .get_module_sync_status(&module.id)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if status.is_some_and(|status| {
+            status.status == "Completed"
+                && status.last_synced_at.is_some_and(|time| {
+                    chrono::Utc::now().signed_duration_since(time) < chrono::Duration::hours(24)
+                })
+        }) {
+            return Ok(Json(
+                serde_json::json!({"status": "cached", "module_id": module.id}),
+            ));
+        }
+    }
+
     let sm = state.sync_manager.clone();
-    let engine = state.engine.clone();
+    let engine = if state.shared_cache.is_some() {
+        Arc::new(Mutex::new(LuaModuleEngine::new_public_only().map_err(
+            |error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+            },
+        )?))
+    } else {
+        state.engine.clone()
+    };
     let db = state.cache_db().clone();
     let ws = state.ws_sender.clone();
     let catalog_ws = state.catalog_ws_sender.clone();
@@ -2603,7 +2701,7 @@ async fn proxy_image(
         )
     })?;
 
-    let client = fmd_net::HttpClient::new()
+    let client = fmd_net::HttpClient::new_public_only()
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut headers = std::collections::HashMap::new();
@@ -2663,8 +2761,7 @@ async fn get_settings_handler(
         ));
     }
     let s = state
-        .db
-        .get_settings()
+        .effective_settings()
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(s))
@@ -2673,7 +2770,7 @@ async fn get_settings_handler(
 async fn update_settings_handler(
     auth::RequireAuth(ctx): auth::RequireAuth,
     State(state): State<AppState>,
-    Json(new_settings): Json<fmd_core::AppSettings>,
+    Json(mut new_settings): Json<fmd_core::AppSettings>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     if state.shared_cache.is_none() && !ctx.user.is_admin() {
         return Err((
@@ -2681,6 +2778,16 @@ async fn update_settings_handler(
             "Privilèges administrateur requis".into(),
         ));
     }
+    if state.shared_cache.is_some() {
+        let current = state
+            .db
+            .get_settings()
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        new_settings.check_interval_hours = current.check_interval_hours;
+        new_settings.catalog_resync_days = current.catalog_resync_days;
+    }
+    state.env_overrides.apply_to_settings(&mut new_settings);
     state
         .db
         .update_settings(&new_settings)
@@ -2818,6 +2925,7 @@ mod tests {
             throttler: auth::DomainThrottler::new(),
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: "test_internal_token".to_string(),
+            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
         };
 
         let dl_id = "test-dl-1";
@@ -3021,6 +3129,7 @@ mod tests {
             throttler: auth::DomainThrottler::new(),
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: "test_internal_token".to_string(),
+            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
         };
 
         let req = QueueDownloadRequest {
@@ -3102,6 +3211,7 @@ mod tests {
             throttler: auth::DomainThrottler::new(),
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: "test_internal_token".to_string(),
+            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
         };
 
         // Initially no users -> setup_needed must be true
@@ -3202,6 +3312,8 @@ mod tests {
         assert!(verify_worker_token(&valid_headers, "secret_token_123").is_ok());
         assert!(verify_worker_token(&invalid_headers, "secret_token_123").is_err());
         assert!(verify_worker_token(&empty_headers, "secret_token_123").is_err());
+        assert!(verify_worker_token(&empty_headers, "").is_err());
+        assert!(verify_worker_token(&valid_headers, "").is_err());
     }
 
     #[tokio::test]
@@ -3235,5 +3347,85 @@ mod tests {
         .await;
         assert!(res1.is_err());
         assert_eq!(res1.err().unwrap().0, axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn env_overrides_force_settings_and_min_delay() {
+        let db = Database::new_in_memory().await.unwrap();
+        let admin = db
+            .create_user(
+                "admin",
+                Some("password"),
+                fmd_core::Role::Admin,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let token = db.create_session(&admin.id, None, None, 1).await.unwrap();
+
+        let (ws_sender, _) = broadcast::channel(10);
+        let state = AppState {
+            db: db.clone(),
+            shared_cache: None,
+            demo_shutdown: None,
+            engine: Arc::new(Mutex::new(LuaModuleEngine::new().unwrap())),
+            modules: Arc::new(vec![]),
+            ws_sender,
+            catalog_ws_sender: None,
+            sync_manager: Arc::new(CatalogSyncManager::new()),
+            nats_context: None,
+            throttler: auth::DomainThrottler::new(),
+            login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
+            internal_worker_token: "test_internal_token".to_string(),
+            env_overrides: fmd_core::RuntimeEnvOverrides {
+                min_delay_ms: Some(2500),
+                check_interval_hours: Some(6),
+                catalog_resync_days: Some(14),
+            },
+        };
+
+        assert_eq!(state.effective_min_delay_ms(100), 2500);
+
+        let app = build_router(state.clone(), "");
+        let post_body = serde_json::to_string(&fmd_core::AppSettings {
+            check_interval_hours: 12,
+            catalog_resync_days: 30,
+            ..Default::default()
+        })
+        .unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/api/settings")
+                    .header(axum::http::header::COOKIE, format!("fmd_session={token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(post_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/settings")
+                    .header(axum::http::header::COOKIE, format!("fmd_session={token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let settings: fmd_core::AppSettings = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(settings.check_interval_hours, 6);
+        assert_eq!(settings.catalog_resync_days, 14);
     }
 }

@@ -695,11 +695,14 @@ pub async fn admin_list_cache_policies(
     State(state): State<AppState>,
     _admin: RequireAdmin,
 ) -> Result<Json<Vec<ModuleCachePolicy>>, (StatusCode, String)> {
-    let policies = state
+    let mut policies = state
         .db
         .list_module_cache_policies()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for policy in &mut policies {
+        policy.min_delay_ms = state.effective_min_delay_ms(policy.min_delay_ms);
+    }
     Ok(Json(policies))
 }
 

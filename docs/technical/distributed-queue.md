@@ -28,8 +28,12 @@ flowchart TD
     end
 ```
 
-### Automatic Detection
-If the environment variable `FMD_NATS_URL` (or the `--nats` CLI flag) is set, FMD3 automatically initializes the NATS JetStream client. If not provided, it falls back seamlessly to the in-memory queue.
+### Automatic Detection & Internal Worker Authentication
+If the environment variable `FMD_NATS_URL` (or the `--nats-url` CLI flag) is set, FMD3 automatically initializes the NATS JetStream client. If not provided, it falls back seamlessly to the in-memory queue.
+
+Distributed workers authenticate callbacks to `/api/internal/tasks/progress` and `/api/internal/tasks/complete` using the `X-FMD-Internal-Token` header (or `Authorization: Bearer <token>`):
+- `fmd worker` requires a non-empty `FMD_INTERNAL_TOKEN` (or `--internal-token`) and fails fast on startup if missing or empty.
+- `fmd serve` rejects empty tokens and performs constant-time validation; if `FMD_INTERNAL_TOKEN` is unset on the server, it generates an ephemeral per-process token so external workers cannot authenticate without an explicitly shared secret.
 
 ---
 

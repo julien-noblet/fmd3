@@ -6,6 +6,12 @@ pub fn register_duktape(lua: &Lua) -> LuaResult<()> {
 
     let exec_js = lua.create_function(|_, code: String| {
         let mut context = Context::default();
+        {
+            let limits = context.runtime_limits_mut();
+            limits.set_loop_iteration_limit(1_000_000);
+            limits.set_recursion_limit(256);
+            limits.set_stack_size_limit(8 * 1024);
+        }
         match context.eval(Source::from_bytes(&code)) {
             Ok(val) => {
                 let s = val

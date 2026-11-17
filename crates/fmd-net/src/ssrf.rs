@@ -31,12 +31,17 @@ pub fn is_safe_ip(ip: IpAddr) -> bool {
             if octets[0] == 169 && octets[1] == 254 {
                 return false;
             }
+            if octets[0] == 192 && octets[1] == 0 && octets[2] == 0
+                || octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+            {
+                return false;
+            }
             // 100.64.0.0/10 (carrier-grade NAT)
             if octets[0] == 100 && (64..=127).contains(&octets[1]) {
                 return false;
             }
             // 224.0.0.0/4 (multicast)
-            if octets[0] >= 224 && octets[0] <= 239 {
+            if octets[0] >= 224 {
                 return false;
             }
             // 255.255.255.255 (broadcast)
@@ -65,6 +70,13 @@ pub fn is_safe_ip(ip: IpAddr) -> bool {
                     segments[7] as u8,
                 ];
                 return is_safe_ip(IpAddr::V4(Ipv4Addr::from(octets)));
+            }
+            if segments[0] & 0xe000 != 0x2000
+                || (segments[0] == 0x2001 && segments[1] < 0x200)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || segments[0] == 0x2002
+            {
+                return false;
             }
             // Unique local address fc00::/7
             if (segments[0] & 0xfe00) == 0xfc00 {

@@ -121,12 +121,8 @@ enum Commands {
         /// Directory for downloaded archives
         #[arg(long, default_value = "downloads")]
         downloads_dir: PathBuf,
-        /// Internal worker authentication token
-        #[arg(
-            long,
-            env = "FMD_INTERNAL_TOKEN",
-            default_value = "fmd_internal_worker_secret_key_san"
-        )]
+        /// Internal worker authentication token (required)
+        #[arg(long, env = "FMD_INTERNAL_TOKEN")]
         internal_token: String,
     },
     /// Manage authentication, users, and API tokens
@@ -819,6 +815,10 @@ async fn run_worker(
     downloads_dir: PathBuf,
     internal_token: String,
 ) -> anyhow::Result<()> {
+    let internal_token = internal_token.trim().to_string();
+    if internal_token.is_empty() {
+        anyhow::bail!("FMD_INTERNAL_TOKEN / --internal-token cannot be empty");
+    }
     tracing::info!("Connecting to NATS at {}...", nats_url);
     let client = async_nats::connect(&nats_url).await?;
     let js = async_nats::jetstream::new(client);

@@ -85,7 +85,7 @@ async fn create_slot(mut state: AppState, base_path: String) -> anyhow::Result<S
     let permissions = UserPermissions {
         can_download: false,
         can_manage_favorites: true,
-        can_trigger_catalog_sync: false,
+        can_trigger_catalog_sync: true,
         can_force_refresh: false,
         can_view_modules: true,
         ..UserPermissions::default()
@@ -226,6 +226,44 @@ async fn close_visitor(visitor: Visitor) {
 }
 
 type SharedManager = Arc<Mutex<Manager>>;
+
+async fn initialize_demo_catalogs(state: &AppState) {
+    for module in state
+        .modules
+        .iter()
+        .filter(|m| m.on_get_name_and_link.is_some())
+    {
+        if state.sync_manager.is_syncing().await {
+            break;
+        }
+        match state.cache_db().get_module_sync_status(&module.id).await {
+            Ok(Some(status))
+                if status.status == "Completed"
+                    && status.last_synced_at.is_some_and(|time| {
+                        chrono::Utc::now().signed_duration_since(time) < chrono::Duration::hours(24)
+                    }) =>
+            {
+                continue
+            }
+            Err(error) => {
+                warn!("Cannot check catalog status for {}: {error}", module.name);
+                continue;
+            }
+            _ => {}
+        }
+        state
+            .sync_manager
+            .clone()
+            .run_sync(
+                module.clone(),
+                state.engine.clone(),
+                state.cache_db().clone(),
+                state.ws_sender.clone(),
+                state.catalog_ws_sender.clone(),
+            )
+            .await;
+    }
+}
 
 fn browser_key(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -559,6 +597,7 @@ pub async fn run_server(
     addr: SocketAddr,
     config: DemoConfig,
     base_path: &str,
+    env_overrides: fmd_core::RuntimeEnvOverrides,
 ) -> anyhow::Result<()> {
     fn reject_symlink(path: &Path) -> anyhow::Result<()> {
         match std::fs::symlink_metadata(path) {
@@ -580,7 +619,7 @@ pub async fn run_server(
     let cache_path = dir.join("public-cache.db");
     reject_symlink(&cache_path)?;
     let cache = Database::new(cache_path).await?;
-    let engine_raw = LuaModuleEngine::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let engine_raw = LuaModuleEngine::new_public_only().map_err(|e| anyhow::anyhow!("{e}"))?;
     let modules = if Path::new("lua/modules").exists() {
         engine_raw
             .scan_modules_dir("lua/modules")
@@ -603,8 +642,20 @@ pub async fn run_server(
         throttler: auth::DomainThrottler::new(),
         login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
         internal_worker_token: generate_secure_token(),
+        env_overrides,
     };
     let fallback = build_router(base.clone(), base_path);
+    let mut sync_state = base.clone();
+    sync_state.engine = Arc::new(Mutex::new(
+        LuaModuleEngine::new_public_only().map_err(|error| anyhow::anyhow!("{error}"))?,
+    ));
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            initialize_demo_catalogs(&sync_state).await;
+        }
+    });
     let manager = Arc::new(Mutex::new(Manager {
         slots: config.slots,
         visitors: VecDeque::new(),
@@ -708,7 +759,7 @@ mod tests {
             db: Database::new_in_memory().await.unwrap(),
             shared_cache: Some(Database::new_in_memory().await.unwrap()),
             demo_shutdown: None,
-            engine: Arc::new(Mutex::new(LuaModuleEngine::new().unwrap())),
+            engine: Arc::new(Mutex::new(LuaModuleEngine::new_public_only().unwrap())),
             modules: Arc::new(vec![]),
             ws_sender,
             catalog_ws_sender: Some(catalog_ws_sender),
@@ -717,6 +768,7 @@ mod tests {
             throttler: auth::DomainThrottler::new(),
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: generate_secure_token(),
+            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
         };
         let fallback = build_router(base.clone(), "");
         Arc::new(Mutex::new(Manager {
@@ -824,6 +876,92 @@ mod tests {
             1
         );
         assert_eq!(second.db.get_catalog_total_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn initializes_catalog_and_fetches_manga_into_24_hour_shared_cache() {
+        let manager = manager(1).await;
+        let base = {
+            let mut state = manager.lock().await;
+            let path = format!(
+                "{}/tests/fixtures/demo-cache.lua",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let module = state
+                .base
+                .engine
+                .lock()
+                .await
+                .load_file(&path)
+                .unwrap()
+                .unwrap();
+            state.base.modules = Arc::new(vec![module]);
+            state.base.clone()
+        };
+        initialize_demo_catalogs(&base).await;
+        let (items, total) = base
+            .cache_db()
+            .search_catalog("", Some("demo-fixture"), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].link, "/manga");
+        let (cookie, credentials) = reserve(&manager, None).await;
+        let login = call(
+            &manager,
+            Method::POST,
+            "/api/auth/login",
+            Some(&cookie),
+            &json!({"username": credentials["username"], "password": credentials["password"]})
+                .to_string(),
+        )
+        .await;
+        let session = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("{cookie}; {session}");
+        let request = json!({"module_id": "demo-fixture", "url": "/manga"}).to_string();
+        let first = call(
+            &manager,
+            Method::POST,
+            "/api/manga/fetch",
+            Some(&cookies),
+            &request,
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: serde_json::Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(first["is_cached"], false);
+        assert_eq!(first["chapters"][0]["title"], "Chapter 1");
+        let cached = base
+            .cache_db()
+            .get_manga_cache("demo-fixture:/manga")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cached.expires_at - cached.cached_at,
+            chrono::Duration::hours(24)
+        );
+        let second = call(
+            &manager,
+            Method::POST,
+            "/api/manga/fetch",
+            Some(&cookies),
+            &request,
+        )
+        .await;
+        let second: serde_json::Value =
+            serde_json::from_slice(&to_bytes(second.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(second["is_cached"], true);
+        initialize_demo_catalogs(&base).await;
+        assert_eq!(base.cache_db().get_catalog_total_count().await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1233,7 +1371,7 @@ mod tests {
                 call(&manager, Method::POST, path, Some(&cookies), "")
                     .await
                     .status(),
-                StatusCode::FORBIDDEN
+                StatusCode::INTERNAL_SERVER_ERROR
             );
         }
     }
@@ -1638,8 +1776,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demo_visitors_cannot_start_shared_catalog_sync() {
+    async fn demo_visitors_can_request_cached_catalog_sync() {
         let manager = manager(1).await;
+        {
+            let mut state = manager.lock().await;
+            state.base.modules = Arc::new(vec![fmd_engine_lua::WebsiteModule {
+                id: "test".into(),
+                name: "test".into(),
+                ..Default::default()
+            }]);
+            state
+                .base
+                .cache_db()
+                .set_module_sync_status("test", "Completed", None, Some(1))
+                .await
+                .unwrap();
+        }
         let (demo_cookie, credentials) = reserve(&manager, None).await;
         let login = json!({
             "username": credentials["username"],
@@ -1666,17 +1818,19 @@ mod tests {
             .unwrap();
         let cookies = format!("{demo_cookie}; {session_cookie}");
 
+        let response = call(
+            &manager,
+            Method::POST,
+            "/api/catalog/sync/test",
+            Some(&cookies),
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
-            call(
-                &manager,
-                Method::POST,
-                "/api/catalog/sync/test",
-                Some(&cookies),
-                ""
-            )
-            .await
-            .status(),
-            StatusCode::FORBIDDEN
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["status"],
+            "cached"
         );
         assert!(!manager.lock().await.base.sync_manager.is_syncing().await);
     }
@@ -1999,5 +2153,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn demo_settings_intervals_cannot_be_modified_and_respect_env_overrides() {
+        let manager = manager(1).await;
+        {
+            let mut guard = manager.lock().await;
+            guard.base.env_overrides = fmd_core::RuntimeEnvOverrides {
+                min_delay_ms: Some(3000),
+                check_interval_hours: Some(12),
+                catalog_resync_days: Some(30),
+            };
+        }
+        let (cookie, credentials) = reserve(&manager, None).await;
+        let login = call(
+            &manager,
+            Method::POST,
+            "/api/auth/login",
+            Some(&cookie),
+            &json!({"username": credentials["username"], "password": credentials["password"]})
+                .to_string(),
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let session = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("{cookie}; {session}");
+
+        let attempted = fmd_core::AppSettings {
+            download_dir: "custom-dl".into(),
+            check_interval_hours: 1,
+            catalog_resync_days: 7,
+            ..Default::default()
+        };
+        let post = call(
+            &manager,
+            Method::POST,
+            "/api/settings",
+            Some(&cookies),
+            &serde_json::to_string(&attempted).unwrap(),
+        )
+        .await;
+        assert_eq!(post.status(), StatusCode::OK);
+
+        let get = call(&manager, Method::GET, "/api/settings", Some(&cookies), "").await;
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+        let settings: fmd_core::AppSettings = serde_json::from_slice(&body).unwrap();
+        assert_eq!(settings.download_dir, "custom-dl");
+        assert_eq!(settings.check_interval_hours, 12);
+        assert_eq!(settings.catalog_resync_days, 30);
     }
 }

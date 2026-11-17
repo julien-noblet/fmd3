@@ -18,7 +18,7 @@ pub use merger::{
 };
 pub use models::{
     AppSettings, CatalogItem, ChapterItem, ChapterMetadata, Favorite, ModuleSyncStatus,
-    PackagingFormat,
+    PackagingFormat, RuntimeEnvOverrides,
 };
 pub use packer::{extract_chapter_number, format_download_path, ChapterPacker};
 pub use queue::{

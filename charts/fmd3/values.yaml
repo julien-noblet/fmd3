@@ -24,13 +24,23 @@ server:
       memory: "256Mi"
   env:
     RUST_LOG: "info"
-  # Extra env entries for the server (e.g. FMD_DEMO_MODE, DEMO_SLOTS)
-  extraEnv: []
+    FMD_DEMO_MODE: "false"
+    DEMO_SLOTS: "10"
+    # Optional runtime overrides (when set, they override DB/UI settings in both normal and demo modes):
+    # FMD_MIN_DELAY_MS: "1000"
+    # FMD_CHECK_INTERVAL_HOURS: "1"
+    # FMD_CATALOG_RESYNC_DAYS: "7"
 
 worker:
   enabled: true
   replicaCount: 2
   concurrency: 2
+  # Shared internal authentication token for server <-> worker callbacks.
+  # Either reference an existing Secret, set internalToken explicitly,
+  # or leave empty to auto-generate a cluster-local Secret.
+  existingSecret: ""
+  secretKey: "internal-token"
+  internalToken: ""
   resources:
     limits:
       cpu: "2000m"

@@ -40,7 +40,7 @@ A high-performance, headless daemon, CLI, and modern Web UI rewrite known as **F
 - **☸️ Cloud-Native & Homelab Ready**
   - Ready-to-deploy **Docker Compose** stack.
   - Complete **Helm Chart** (`charts/fmd3`) with configurable PVCs, Ingress, and auto-scaling workers.
-  - Deterministic Nix Flake development environment (`nix develop`).
+  - Deterministic [devenv](https://devenv.sh/) development environment (`devenv shell`).
 
 ---
 
@@ -55,11 +55,11 @@ Open your browser at **http://localhost:8088** to access the Web UI.
 
 ### 2. Building from Source (Rust Cargo)
 
-Make sure you have Rust 1.80+ or use Nix Flake:
+Make sure you have Rust 1.80+ or use `devenv`:
 
 ```bash
-# Enter nix shell (optional)
-nix develop
+# Enter devenv shell (optional)
+devenv shell
 
 # Build and start server
 cargo run --release --bin fmd -- serve --port 8088 --bind 0.0.0.0
@@ -78,15 +78,35 @@ FMD_DEMO_MODE=true DEMO_SLOTS=10 cargo run --release --bin fmd -- serve --bind 0
 separate temporary accounts; when all slots are occupied, new visitors join a
 FIFO queue. Accounts and their data expire after 20 minutes without interaction
 or on logout. Downloads, account management and API tokens are disabled.
-Live scraping is disabled in demo mode: manga fetches, favorite checks and
-merges can only use unexpired manga data already in the public cache. Populate
-that cache from a trusted source before starting the demo. Restarting the
+The server initializes module catalogs in the background, and visitors can
+request catalog syncs and fetch manga. Catalogs and manga data are cached for
+24 hours; requests to private network destinations are blocked. Restarting the
 server clears all sessions and the queue. Public data and the catalog are shared
 and persist in `data/fmd-demo/public-cache.db`; never use
 this as the data directory of a normal installation. A single demo instance is
 required: multiple replicas do not share the queue or enforce a global limit.
 Do not run download workers for the demo. When publishing it, use HTTPS and a
 trusted reverse proxy that sets `X-Forwarded-Proto: https`.
+
+With the Helm chart, enable demo mode and disable download workers:
+
+```bash
+helm upgrade --install fmd3 ./charts/fmd3 \
+  --set server.env.FMD_DEMO_MODE=true \
+  --set server.env.DEMO_SLOTS=10 \
+  --set server.replicaCount=1 \
+  --set worker.enabled=false
+```
+
+### Scrape & Refresh Environment Variables
+
+You can enforce server-wide defaults/overrides for scraping delays and background refresh intervals via environment variables (in both normal and demo modes, these take precedence over database/UI values; in demo mode, interval settings cannot be modified by visitors):
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `FMD_MIN_DELAY_MS` | `1000` | Minimum anti-ban delay in milliseconds between consecutive requests to the same module (`>= 0`). |
+| `FMD_CHECK_INTERVAL_HOURS` | `1` | Interval in hours for checking tracked favorites (`>= 1`). |
+| `FMD_CATALOG_RESYNC_DAYS` | `7` | Interval in days for scheduled catalog resynchronization (`>= 1`). |
 
 ---
 
@@ -119,8 +139,8 @@ fmd catalog --sync novelcool_fr
 # Import legacy FMD2 userdata.db / SQLite databases
 fmd import-legacy --db path/to/userdata.db
 
-# Run as a distributed background worker connected to NATS
-fmd worker --nats nats://localhost:4222
+# Run as a distributed background worker connected to NATS (requires matching FMD_INTERNAL_TOKEN)
+FMD_INTERNAL_TOKEN="replace-with-shared-secret" fmd worker --nats-url nats://127.0.0.1:4222 --server-url http://127.0.0.1:8088
 ```
 
 ---

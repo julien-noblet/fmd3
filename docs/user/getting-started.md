@@ -32,7 +32,10 @@ services:
 
 ### 1.2 Start the Daemon
 
+When using the repository's [docker-compose.yml](../../docker-compose.yml) (which runs `fmd-server` + `fmd-worker` + `nats`), set a shared non-empty `FMD_INTERNAL_TOKEN` in your shell or `.env` file before starting:
+
 ```bash
+export FMD_INTERNAL_TOKEN="$(openssl rand -hex 32)"
 docker compose up -d
 ```
 
@@ -67,6 +70,8 @@ helm upgrade --install fmd3 ./charts/fmd3 \
   --set worker.replicaCount=3
 ```
 
+When `worker.enabled=true`, the Helm chart automatically wires a shared `FMD_INTERNAL_TOKEN` between `fmd3-server` and `fmd3-worker` (creating a Secret automatically unless `worker.existingSecret` or `worker.internalToken` is specified).
+
 For Helm deployments, set `server.basePath` to the same path prefix configured on the ingress, for example `--set server.basePath=/reader`. The ingress may forward the prefix unchanged or strip it before forwarding.
 
 ---
@@ -92,13 +97,13 @@ cargo build --release --bin fmd
 
 ---
 
-## 4. Reproducible Environment with Nix Flake
+## 4. Reproducible Environment with devenv
 
 If you use Nix or NixOS, enter an isolated development shell with all dependencies, compilers, and libraries pre-configured:
 
 ```bash
-# Enter nix environment
-nix develop
+# Enter devenv environment
+devenv shell
 
 # Run the test suite
 cargo test --workspace
