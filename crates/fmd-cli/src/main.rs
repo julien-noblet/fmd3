@@ -15,6 +15,9 @@ use tracing_subscriber::EnvFilter;
     about = "Free Manga Downloader 2 - Linux Headless Daemon & Web Server"
 )]
 struct Cli {
+    /// Database connection URL (sqlite://... or postgres://...)
+    #[arg(long, env = "FMD_DATABASE_URL", global = true)]
+    database_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -200,10 +203,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let database_url = cli.database_url.clone();
 
     match cli.command {
         Commands::Serve { bind } => {
-            fmd_server::run_server(bind).await?;
+            fmd_server::run_server(bind, database_url).await?;
         }
         Commands::Worker {
             nats_url,
@@ -362,8 +366,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::ImportLegacy { path, target_db } => {
-            println!("Connecting to modern database at {:?}...", target_db);
-            let db = Database::new(target_db).await?;
+            let db_url =
+                Database::resolve_url(database_url.as_deref(), &target_db.to_string_lossy());
+            println!("Connecting to modern database ({})...", db_url);
+            let db = Database::connect(&db_url).await?;
             println!("Importing legacy FMD2 database from {:?}...", path);
             let count = db.import_legacy_db(path).await?;
             println!("Successfully imported {} favorites/series!", count);
@@ -376,7 +382,8 @@ async fn main() -> anyhow::Result<()> {
             dir,
             limit,
         } => {
-            let database = Database::new(db).await?;
+            let db_url = Database::resolve_url(database_url.as_deref(), &db.to_string_lossy());
+            let database = Database::connect(&db_url).await?;
 
             if let Some(mod_target) = sync {
                 let engine = LuaModuleEngine::new()?;
@@ -482,7 +489,11 @@ async fn main() -> anyhow::Result<()> {
             db,
             dir,
         } => {
-            let database = Database::new(db).await?;
+            let database = Database::connect(&Database::resolve_url(
+                database_url.as_deref(),
+                &db.to_string_lossy(),
+            ))
+            .await?;
             let favorites = database.list_favorites_with_stats().await?;
 
             if check {
@@ -556,20 +567,17 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                             for ch in new_chaps {
                                                 let dl_id = uuid::Uuid::new_v4().to_string();
-                                                let _ = sqlx::query(
-                                                    r#"
-                                                    INSERT INTO downloads (id, manga_title, chapter_title, chapter_url, module_id, format, status)
-                                                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending')
-                                                    "#,
-                                                )
-                                                .bind(&dl_id)
-                                                .bind(&fav.title)
-                                                .bind(&ch.title)
-                                                .bind(&ch.url)
-                                                .bind(&fav.module_id)
-                                                .bind(&fav.download_format)
-                                                .execute(database.pool())
-                                                .await;
+                                                let _ = database
+                                                    .queue_download(
+                                                        &dl_id,
+                                                        &fav.title,
+                                                        &ch.title,
+                                                        &ch.url,
+                                                        &fav.module_id,
+                                                        &fav.download_format,
+                                                        3,
+                                                    )
+                                                    .await;
                                             }
                                         }
                                     }
@@ -626,7 +634,11 @@ async fn main() -> anyhow::Result<()> {
             list: _,
             db,
         } => {
-            let database = Database::new(db).await?;
+            let database = Database::connect(&Database::resolve_url(
+                database_url.as_deref(),
+                &db.to_string_lossy(),
+            ))
+            .await?;
             if let Some(key) = get {
                 let val = database.get_setting(&key).await?;
                 println!("{}: {}", key, val.unwrap_or_else(|| "<not set>".into()));
@@ -735,7 +747,11 @@ async fn main() -> anyhow::Result<()> {
                 expires_days,
                 db,
             } => {
-                let database = Database::new(db).await?;
+                let database = Database::connect(&Database::resolve_url(
+                    database_url.as_deref(),
+                    &db.to_string_lossy(),
+                ))
+                .await?;
                 let user_opt = database.get_user_by_username(&username).await?;
                 match user_opt {
                     Some(user) => {
@@ -758,7 +774,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             AuthCommands::ListUsers { db } => {
-                let database = Database::new(db).await?;
+                let database = Database::connect(&Database::resolve_url(
+                    database_url.as_deref(),
+                    &db.to_string_lossy(),
+                ))
+                .await?;
                 let users = database.list_users_with_permissions().await?;
                 println!("=== Registered FMD3 Users ({}) ===", users.len());
                 for (u, p) in users {
@@ -781,7 +801,11 @@ async fn main() -> anyhow::Result<()> {
                 role,
                 db,
             } => {
-                let database = Database::new(db).await?;
+                let database = Database::connect(&Database::resolve_url(
+                    database_url.as_deref(),
+                    &db.to_string_lossy(),
+                ))
+                .await?;
                 let r = fmd_core::Role::from_str(&role);
                 let user_count = database.count_users().await?;
                 if user_count == 0 && r == fmd_core::Role::Admin {

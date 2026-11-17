@@ -303,14 +303,10 @@ async fn handle_download_failure(
             dl_id, manga_title, chapter_title, next_retry, max_retries, err_msg
         );
 
-        let _ = sqlx::query(
-            "UPDATE downloads SET status = 'Pending', retry_count = ?1, error_message = ?2, created_at = CURRENT_TIMESTAMP WHERE id = ?3"
-        )
-        .bind(next_retry)
-        .bind(&retry_note)
-        .bind(dl_id)
-        .execute(dl_state.db.pool())
-        .await;
+        let _ = dl_state
+            .db
+            .schedule_download_retry(dl_id, next_retry, &retry_note)
+            .await;
 
         let _ = dl_state.ws_sender.send(WsNotification {
             event: "download_progress".into(),
@@ -330,12 +326,7 @@ async fn handle_download_failure(
             dl_id, manga_title, chapter_title, max_retries, err_msg
         );
 
-        let _ =
-            sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
-                .bind(err_msg)
-                .bind(dl_id)
-                .execute(dl_state.db.pool())
-                .await;
+        let _ = dl_state.db.mark_download_failed(dl_id, err_msg).await;
 
         let _ = dl_state.ws_sender.send(WsNotification {
             event: "download_failed".into(),
@@ -350,14 +341,15 @@ async fn handle_download_failure(
     }
 }
 
-pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn run_server(addr: SocketAddr, database_url: Option<String>) -> anyhow::Result<()> {
     let base_path = base_path::from_env()?;
     let env_overrides =
         fmd_core::RuntimeEnvOverrides::from_env().map_err(|err| anyhow::anyhow!("{err}"))?;
     if let Some(config) = demo::DemoConfig::from_env()? {
-        return demo::run_server(addr, config, &base_path, env_overrides).await;
+        return demo::run_server(addr, config, &base_path, env_overrides, database_url).await;
     }
-    let db = Database::new("data/fmd.db").await?;
+    let db_url = Database::resolve_url(database_url.as_deref(), "data/fmd.db");
+    let db = Database::connect(&db_url).await?;
 
     // Auto-bootstrap admin user if credentials provided via env or k8s secret
     if let Err(e) = auth::bootstrap_admin_from_env_or_secret(&db).await {
@@ -527,13 +519,12 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
         let dl_state = state.clone();
         tokio::spawn(async move {
             loop {
-                let pending_opt = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64)>(
-                "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE status = 'Pending' ORDER BY created_at ASC LIMIT 1"
-            )
-            .fetch_optional(dl_state.db.pool())
-            .await
-            .ok()
-            .flatten();
+                let pending_opt = dl_state
+                    .db
+                    .fetch_next_pending_download()
+                    .await
+                    .ok()
+                    .flatten();
 
                 if let Some((
                     dl_id,
@@ -551,11 +542,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                     dl_id, manga_title, chapter_title, module_id, format_str, retry_count + 1, max_retries
                 );
 
-                    let _ =
-                        sqlx::query("UPDATE downloads SET status = 'Downloading' WHERE id = ?1")
-                            .bind(&dl_id)
-                            .execute(dl_state.db.pool())
-                            .await;
+                    let _ = dl_state.db.set_download_status(&dl_id, "Downloading").await;
 
                     let _ = dl_state.ws_sender.send(WsNotification {
                         event: "download_progress".into(),
@@ -616,10 +603,9 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                         };
 
                         let total = pages.len();
-                        let _ = sqlx::query("UPDATE downloads SET total_pages = ?1 WHERE id = ?2")
-                            .bind(total as i64)
-                            .bind(&dl_id)
-                            .execute(dl_state.db.pool())
+                        let _ = dl_state
+                            .db
+                            .set_download_total_pages(&dl_id, total as i64)
                             .await;
 
                         info!(
@@ -688,11 +674,10 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                                         let page_name = format!("{:03}.{}", idx + 1, ext);
                                         packer.add_page(page_name, bytes);
 
-                                        let _ = sqlx::query("UPDATE downloads SET downloaded_pages = ?1 WHERE id = ?2")
-                                        .bind((idx + 1) as i64)
-                                        .bind(&dl_id)
-                                        .execute(dl_state.db.pool())
-                                        .await;
+                                        let _ = dl_state
+                                            .db
+                                            .set_download_progress(&dl_id, (idx + 1) as i64)
+                                            .await;
 
                                         let _ = dl_state.ws_sender.send(WsNotification {
                                             event: "download_progress".into(),
@@ -762,30 +747,12 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                             let chap_num = fmd_core::extract_chapter_number(&chapter_title)
                                 .unwrap_or_default();
 
-                            let prefix_id = format!("{}:%", module_id);
-                            let manga_meta = sqlx::query_as::<
-                                _,
-                                (
-                                    Option<String>,
-                                    Option<String>,
-                                    Option<String>,
-                                    Option<String>,
-                                ),
-                            >(
-                                r#"
-                            SELECT author, genres, description, original_url
-                            FROM mangas
-                            WHERE title = ?1 OR id LIKE ?2
-                            ORDER BY (author IS NOT NULL AND author != '') DESC, updated_at DESC
-                            LIMIT 1
-                            "#,
-                            )
-                            .bind(&manga_title)
-                            .bind(&prefix_id)
-                            .fetch_optional(dl_state.db.pool())
-                            .await
-                            .ok()
-                            .flatten();
+                            let manga_meta = dl_state
+                                .db
+                                .get_manga_metadata_for_packaging(&manga_title, &module_id)
+                                .await
+                                .ok()
+                                .flatten();
 
                             let genres_vec = manga_meta
                                 .as_ref()
@@ -846,10 +813,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
 
                             match packer.pack_to(fmt, &out_path) {
                                 Ok(_) => {
-                                    let _ = sqlx::query("UPDATE downloads SET status = 'Completed', downloaded_pages = total_pages, error_message = NULL WHERE id = ?1")
-                                    .bind(&dl_id)
-                                    .execute(dl_state.db.pool())
-                                    .await;
+                                    let _ = dl_state.db.mark_download_completed_full(&dl_id).await;
 
                                     let _ =
                                         dl_state.db.mark_chapter_downloaded("", &chapter_url).await;
@@ -882,11 +846,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
                     } else {
                         let err = format!("Module '{}' introuvable", module_id);
                         error!("Download worker: [{}] {}", dl_id, err);
-                        let _ = sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
-                        .bind(&err)
-                        .bind(&dl_id)
-                        .execute(dl_state.db.pool())
-                        .await;
+                        let _ = dl_state.db.mark_download_failed(&dl_id, &err).await;
 
                         let _ = dl_state.ws_sender.send(WsNotification {
                         event: "download_failed".into(),
@@ -917,7 +877,7 @@ pub async fn run_server(addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_router(state: AppState, base_path: &str) -> Router {
+pub fn build_router(state: AppState, base_path: &str) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
         .allow_methods([
@@ -1212,12 +1172,7 @@ async fn list_mangas(
     _auth: auth::RequireAuth,
     State(state): State<AppState>,
 ) -> Json<Vec<MangaRow>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT id, module_id, title, original_url, status FROM mangas LIMIT 100",
-    )
-    .fetch_all(state.db.pool())
-    .await
-    .unwrap_or_default();
+    let rows = state.db.list_mangas_summary(100).await.unwrap_or_default();
 
     let result = rows
         .into_iter()
@@ -1749,9 +1704,9 @@ async fn remove_favorite(
             "Permission 'can_manage_favorites' requise".into(),
         ));
     }
-    sqlx::query("DELETE FROM favorites WHERE manga_id = ?1")
-        .bind(&id)
-        .execute(state.db.pool())
+    state
+        .db
+        .delete_favorite(&id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1904,20 +1859,18 @@ async fn check_favorite_internal(
         if fav.auto_download {
             for ch in &new_chapters {
                 let dl_id = uuid::Uuid::new_v4().to_string();
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO downloads (id, manga_title, chapter_title, chapter_url, module_id, format, status)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending')
-                    "#,
-                )
-                .bind(&dl_id)
-                .bind(&fav.title)
-                .bind(&ch.title)
-                .bind(&ch.url)
-                .bind(&fav.module_id)
-                .bind(&fav.download_format)
-                .execute(state.db.pool())
-                .await;
+                let _ = state
+                    .db
+                    .queue_download(
+                        &dl_id,
+                        &fav.title,
+                        &ch.title,
+                        &ch.url,
+                        &fav.module_id,
+                        &fav.download_format,
+                        3,
+                    )
+                    .await;
 
                 let _ = state.ws_sender.send(WsNotification {
                     event: "download_queued".into(),
@@ -2155,36 +2108,11 @@ async fn list_downloads(
     _auth: auth::RequireAuth,
     State(state): State<AppState>,
 ) -> Json<Vec<DownloadItem>> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            Option<String>,
-            i64,
-            i64,
-            String,
-        ),
-    >(
-        r#"
-        SELECT id, manga_title, chapter_title, chapter_url, module_id, format,
-               total_pages, downloaded_pages, status, error_message,
-               COALESCE(retry_count, 0), COALESCE(max_retries, 3), created_at
-        FROM downloads
-        ORDER BY created_at DESC
-        LIMIT 200
-        "#,
-    )
-    .fetch_all(state.db.pool())
-    .await
-    .unwrap_or_default();
+    let rows = state
+        .db
+        .list_downloads_with_created_at(200)
+        .await
+        .unwrap_or_default();
 
     let list = rows
         .into_iter()
@@ -2260,20 +2188,18 @@ async fn queue_downloads(
     for ch in req.chapters {
         let dl_id = uuid::Uuid::new_v4().to_string();
         let mod_id = ch.module_id.as_deref().unwrap_or(&req.module_id);
-        let res = sqlx::query(
-            r#"
-            INSERT INTO downloads (id, manga_title, chapter_title, chapter_url, module_id, format, status)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending')
-            "#
-        )
-        .bind(&dl_id)
-        .bind(&req.manga_title)
-        .bind(&ch.title)
-        .bind(&ch.url)
-        .bind(mod_id)
-        .bind(&format)
-        .execute(state.db.pool())
-        .await;
+        let res = state
+            .db
+            .queue_download(
+                &dl_id,
+                &req.manga_title,
+                &ch.title,
+                &ch.url,
+                mod_id,
+                &format,
+                3,
+            )
+            .await;
 
         if res.is_ok() {
             queued += 1;
@@ -2318,9 +2244,9 @@ async fn remove_download(
             "Permission 'can_download' requise".into(),
         ));
     }
-    sqlx::query("DELETE FROM downloads WHERE id = ?1")
-        .bind(&id)
-        .execute(state.db.pool())
+    state
+        .db
+        .delete_download(&id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2343,20 +2269,23 @@ async fn retry_download(
             "Permission 'can_download' requise".into(),
         ));
     }
-    sqlx::query("UPDATE downloads SET status = 'Pending', error_message = NULL, downloaded_pages = 0, retry_count = 0, created_at = CURRENT_TIMESTAMP WHERE id = ?1")
-        .bind(&id)
-        .execute(state.db.pool())
+    state
+        .db
+        .reset_download_for_retry(&id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(ref js) = state.nats_context {
-        if let Ok(Some((dl_id, manga_title, chapter_title, chapter_url, module_id, format_str, retry_count, max_retries))) =
-            sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64)>(
-                "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE id = ?1"
-            )
-            .bind(&id)
-            .fetch_optional(state.db.pool())
-            .await
+        if let Ok(Some((
+            dl_id,
+            manga_title,
+            chapter_title,
+            chapter_url,
+            module_id,
+            format_str,
+            retry_count,
+            max_retries,
+        ))) = state.db.get_download_retry_info(&id).await
         {
             let task = fmd_core::TaskMessage::new_download(
                 dl_id,
@@ -2369,7 +2298,9 @@ async fn retry_download(
                 max_retries as u32,
             );
             if let Ok(bytes) = serde_json::to_vec(&task) {
-                let _ = js.publish(fmd_core::SUBJECT_TASK_DOWNLOAD, bytes.into()).await;
+                let _ = js
+                    .publish(fmd_core::SUBJECT_TASK_DOWNLOAD, bytes.into())
+                    .await;
             }
         }
     }
@@ -2394,22 +2325,26 @@ async fn retry_all_failed_downloads(
             "Permission 'can_download' requise".into(),
         ));
     }
-    let res = sqlx::query("UPDATE downloads SET status = 'Pending', error_message = NULL, downloaded_pages = 0, retry_count = 0, created_at = CURRENT_TIMESTAMP WHERE status = 'Failed'")
-        .execute(state.db.pool())
+    let count = state
+        .db
+        .reset_all_failed_downloads()
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let count = res.rows_affected();
     info!("Manual retry triggered for {} failed download(s)", count);
 
     if let Some(ref js) = state.nats_context {
-        if let Ok(failed_list) = sqlx::query_as::<_, (String, String, String, String, String, String, i64, i64)>(
-            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE status = 'Pending'"
-        )
-        .fetch_all(state.db.pool())
-        .await
-        {
-            for (dl_id, manga_title, chapter_title, chapter_url, module_id, format_str, retry_count, max_retries) in failed_list {
+        if let Ok(failed_list) = state.db.list_pending_downloads().await {
+            for (
+                dl_id,
+                manga_title,
+                chapter_title,
+                chapter_url,
+                module_id,
+                format_str,
+                retry_count,
+                max_retries,
+            ) in failed_list
+            {
                 let task = fmd_core::TaskMessage::new_download(
                     dl_id,
                     manga_title,
@@ -2421,7 +2356,9 @@ async fn retry_all_failed_downloads(
                     max_retries as u32,
                 );
                 if let Ok(bytes) = serde_json::to_vec(&task) {
-                    let _ = js.publish(fmd_core::SUBJECT_TASK_DOWNLOAD, bytes.into()).await;
+                    let _ = js
+                        .publish(fmd_core::SUBJECT_TASK_DOWNLOAD, bytes.into())
+                        .await;
                 }
             }
         }
@@ -2442,16 +2379,16 @@ async fn internal_task_progress(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     verify_worker_token(&headers, &state.internal_worker_token)?;
 
-    let _ = sqlx::query(
-        "UPDATE downloads SET status = ?1, downloaded_pages = ?2, total_pages = COALESCE(?3, total_pages), error_message = ?4 WHERE id = ?5"
-    )
-    .bind(&req.status)
-    .bind(req.downloaded_pages as i64)
-    .bind(req.total_pages.map(|t| t as i64))
-    .bind(&req.message)
-    .bind(&req.task_id)
-    .execute(state.db.pool())
-    .await;
+    let _ = state
+        .db
+        .update_download_progress_full(
+            &req.task_id,
+            &req.status,
+            req.downloaded_pages as i64,
+            req.total_pages.map(|t| t as i64),
+            req.message.as_deref(),
+        )
+        .await;
 
     let _ = state.ws_sender.send(WsNotification {
         event: "download_progress".into(),
@@ -2473,20 +2410,14 @@ async fn internal_task_complete(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     verify_worker_token(&headers, &state.internal_worker_token)?;
     if req.success {
-        let _ = sqlx::query(
-            "UPDATE downloads SET status = 'Completed', downloaded_pages = total_pages, error_message = NULL WHERE id = ?1"
-        )
-        .bind(&req.task_id)
-        .execute(state.db.pool())
-        .await;
+        let _ = state.db.mark_download_completed_full(&req.task_id).await;
 
-        let ch_url =
-            sqlx::query_scalar::<_, String>("SELECT chapter_url FROM downloads WHERE id = ?1")
-                .bind(&req.task_id)
-                .fetch_optional(state.db.pool())
-                .await
-                .ok()
-                .flatten();
+        let ch_url = state
+            .db
+            .get_download_chapter_url(&req.task_id)
+            .await
+            .ok()
+            .flatten();
 
         if let Some(url) = ch_url {
             let _ = state.db.mark_chapter_downloaded("", &url).await;
@@ -2501,16 +2432,15 @@ async fn internal_task_complete(
             }),
         });
     } else {
-        let _ =
-            sqlx::query("UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2")
-                .bind(
-                    req.error_message
-                        .as_deref()
-                        .unwrap_or("Worker task execution failure"),
-                )
-                .bind(&req.task_id)
-                .execute(state.db.pool())
-                .await;
+        let _ = state
+            .db
+            .mark_download_failed(
+                &req.task_id,
+                req.error_message
+                    .as_deref()
+                    .unwrap_or("Worker task execution failure"),
+            )
+            .await;
 
         let _ = state.ws_sender.send(WsNotification {
             event: "download_failed".into(),
@@ -2929,24 +2859,27 @@ mod tests {
         };
 
         let dl_id = "test-dl-1";
-        sqlx::query(
-            "INSERT INTO downloads (id, manga_title, chapter_title, chapter_url, module_id, format, status, retry_count, max_retries) VALUES (?1, 'Manga A', 'Ch. 1', 'https://example.com/1', 'test_mod', 'Cbz', 'Downloading', 0, 3)"
+        db.queue_download(
+            dl_id,
+            "Manga A",
+            "Ch. 1",
+            "https://example.com/1",
+            "test_mod",
+            "Cbz",
+            3,
         )
-        .bind(dl_id)
-        .execute(db.pool())
         .await
         .unwrap();
+        db.set_download_status(dl_id, "Downloading").await.unwrap();
 
         // 1st failure: attempt 1 of 3 -> should become Pending with retry_count = 1
         handle_download_failure(&state, dl_id, "Manga A", "Ch. 1", 0, 3, "HTTP 500").await;
 
-        let row1 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
-        )
-        .bind(dl_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let row1 = db
+            .get_download_status_and_retry(dl_id)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(row1.0, "Pending");
         assert_eq!(row1.1, 1);
@@ -2955,13 +2888,11 @@ mod tests {
         // 3rd failure (retry_count = 2, max_retries = 3) -> should become Pending with retry_count = 3
         handle_download_failure(&state, dl_id, "Manga A", "Ch. 1", 2, 3, "HTTP 503").await;
 
-        let row2 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
-        )
-        .bind(dl_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let row2 = db
+            .get_download_status_and_retry(dl_id)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(row2.0, "Pending");
         assert_eq!(row2.1, 3);
@@ -2969,13 +2900,11 @@ mod tests {
         // 4th failure (retry_count = 3 >= max_retries 3) -> should become Failed
         handle_download_failure(&state, dl_id, "Manga A", "Ch. 1", 3, 3, "HTTP 504").await;
 
-        let row3 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
-        )
-        .bind(dl_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let row3 = db
+            .get_download_status_and_retry(dl_id)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(row3.0, "Failed");
         assert_eq!(row3.1, 3);
@@ -3005,13 +2934,11 @@ mod tests {
             .unwrap();
         assert_eq!(res.0["count"], 1);
 
-        let row4 = sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
-        )
-        .bind(dl_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let row4 = db
+            .get_download_status_and_retry(dl_id)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(row4.0, "Pending");
         assert_eq!(row4.1, 0);
@@ -3043,30 +2970,11 @@ mod tests {
         .unwrap();
 
         // Query metadata from database
-        let prefix_id = "test_mod:%";
-        let manga_meta = sqlx::query_as::<
-            _,
-            (
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ),
-        >(
-            r#"
-            SELECT author, genres, description, original_url
-            FROM mangas
-            WHERE title = ?1 OR id LIKE ?2
-            ORDER BY (author IS NOT NULL AND author != '') DESC, updated_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind("One Piece")
-        .bind(prefix_id)
-        .fetch_optional(db.pool())
-        .await
-        .unwrap()
-        .unwrap();
+        let manga_meta = db
+            .get_manga_metadata_for_packaging("One Piece", "test_mod")
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(manga_meta.0.as_deref(), Some("Eiichiro Oda"));
         assert_eq!(
@@ -3178,12 +3086,14 @@ mod tests {
             .unwrap();
         assert_eq!(res.0["queued"], 2);
 
-        let items = sqlx::query_as::<_, (String, String, String, String)>(
-            "SELECT chapter_title, chapter_url, module_id, format FROM downloads ORDER BY chapter_title ASC"
-        )
-        .fetch_all(db.pool())
-        .await
-        .unwrap();
+        let mut items: Vec<_> = db
+            .list_downloads_summary(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.2, r.3, r.4, r.5))
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
 
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].0, "Chapitre 1");

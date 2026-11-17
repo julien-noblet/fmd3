@@ -104,9 +104,14 @@ You can enforce server-wide defaults/overrides for scraping delays and backgroun
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `FMD_DATABASE_URL` | `sqlite://data/fmd.db` | Database connection URL (`sqlite://...` or `postgres://...` / `postgresql://...`). In demo mode with PostgreSQL, visitor slots use isolated ephemeral `demo_slot_*` schemas. |
 | `FMD_MIN_DELAY_MS` | `1000` | Minimum anti-ban delay in milliseconds between consecutive requests to the same module (`>= 0`). |
 | `FMD_CHECK_INTERVAL_HOURS` | `1` | Interval in hours for checking tracked favorites (`>= 1`). |
 | `FMD_CATALOG_RESYNC_DAYS` | `7` | Interval in days for scheduled catalog resynchronization (`>= 1`). |
+
+### Local Development with `devenv`
+
+`devenv up` starts local PostgreSQL (`fmd` database), NATS JetStream, `fmd serve`, and `fmd worker` with `FMD_DATABASE_URL` configured for PostgreSQL.
 
 ---
 
