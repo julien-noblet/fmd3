@@ -597,6 +597,7 @@ pub async fn run_server(
     addr: SocketAddr,
     config: DemoConfig,
     base_path: &str,
+    env_overrides: fmd_core::RuntimeEnvOverrides,
 ) -> anyhow::Result<()> {
     fn reject_symlink(path: &Path) -> anyhow::Result<()> {
         match std::fs::symlink_metadata(path) {
@@ -641,6 +642,7 @@ pub async fn run_server(
         throttler: auth::DomainThrottler::new(),
         login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
         internal_worker_token: generate_secure_token(),
+        env_overrides,
     };
     let fallback = build_router(base.clone(), base_path);
     let mut sync_state = base.clone();
@@ -766,6 +768,7 @@ mod tests {
             throttler: auth::DomainThrottler::new(),
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: generate_secure_token(),
+            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
         };
         let fallback = build_router(base.clone(), "");
         Arc::new(Mutex::new(Manager {
@@ -2150,5 +2153,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn demo_settings_intervals_cannot_be_modified_and_respect_env_overrides() {
+        let manager = manager(1).await;
+        {
+            let mut guard = manager.lock().await;
+            guard.base.env_overrides = fmd_core::RuntimeEnvOverrides {
+                min_delay_ms: Some(3000),
+                check_interval_hours: Some(12),
+                catalog_resync_days: Some(30),
+            };
+        }
+        let (cookie, credentials) = reserve(&manager, None).await;
+        let login = call(
+            &manager,
+            Method::POST,
+            "/api/auth/login",
+            Some(&cookie),
+            &json!({"username": credentials["username"], "password": credentials["password"]})
+                .to_string(),
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let session = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("{cookie}; {session}");
+
+        let attempted = fmd_core::AppSettings {
+            download_dir: "custom-dl".into(),
+            check_interval_hours: 1,
+            catalog_resync_days: 7,
+            ..Default::default()
+        };
+        let post = call(
+            &manager,
+            Method::POST,
+            "/api/settings",
+            Some(&cookies),
+            &serde_json::to_string(&attempted).unwrap(),
+        )
+        .await;
+        assert_eq!(post.status(), StatusCode::OK);
+
+        let get = call(&manager, Method::GET, "/api/settings", Some(&cookies), "").await;
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+        let settings: fmd_core::AppSettings = serde_json::from_slice(&body).unwrap();
+        assert_eq!(settings.download_dir, "custom-dl");
+        assert_eq!(settings.check_interval_hours, 12);
+        assert_eq!(settings.catalog_resync_days, 30);
     }
 }

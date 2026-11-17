@@ -508,4 +508,111 @@ process.stdin.on('end', () => {
             );
         }
     }
+
+    #[test]
+    fn demo_settings_disables_interval_selects_and_supports_custom_env_values() {
+        let Ok(mut child) = std::process::Command::new("node")
+            .arg("-e")
+            .arg(
+                r#"
+const vm = require('vm');
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+    function makeSelect(values) {
+        const classes = new Set();
+        return {
+            options: values.map(v => ({ value: String(v), textContent: String(v) })),
+            value: String(values[0]),
+            disabled: false,
+            classList: { add: (...xs) => xs.forEach(x => classes.add(x)) },
+            appendChild(opt) { this.options.push(opt); },
+            _classes: classes,
+        };
+    }
+    const elements = new Map([
+        ['setting-download-dir', { value: '' }],
+        ['setting-default-format', { value: '' }],
+        ['setting-naming-template', { value: '' }],
+        ['setting-flaresolverr-url', { value: '' }],
+        ['setting-check-interval', makeSelect(['1', '3', '6', '12', '24'])],
+        ['setting-catalog-resync', makeSelect(['7', '14', '30'])],
+    ]);
+    const sandbox = {
+        console,
+        document: {
+            getElementById: id => elements.get(id) || null,
+            querySelectorAll: () => [],
+            documentElement: {},
+            createElement: () => ({ value: '', textContent: '' }),
+        },
+        navigator: { language: 'en' },
+        LOCALES: { en: {} },
+        LANGUAGES: [],
+        fetch: async (url) => ({
+            ok: true,
+            json: async () => url === '/api/demo/info'
+                ? { demo: true }
+                : url === '/api/settings'
+                ? {
+                    download_dir: 'downloads',
+                    default_format: 'CBZ',
+                    naming_template: '{manga}/{chapter}',
+                    flaresolverr_url: '',
+                    check_interval_hours: 2,
+                    catalog_resync_days: 5,
+                }
+                : {},
+        }),
+        updateNamingPreview: () => {},
+        addEventListener: () => {},
+        history: { replaceState: () => {}, pushState: () => {} },
+        location: { protocol: 'http:', host: 'localhost', hash: '' },
+        localStorage: { getItem: () => null, setItem: () => {} },
+        sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        WebSocket: function() {},
+        setTimeout: () => 0,
+        clearTimeout: () => {},
+        setInterval: () => 0,
+        clearInterval: () => {},
+        URLSearchParams,
+    };
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(data, sandbox);
+    (async () => {
+        vm.runInContext('demoMode = true;', sandbox);
+        await sandbox.loadSettings();
+        const checkSel = elements.get('setting-check-interval');
+        const resyncSel = elements.get('setting-catalog-resync');
+        if (checkSel.value !== '2' || !checkSel.disabled) {
+            throw new Error('check interval not updated or not disabled in demo mode');
+        }
+        if (resyncSel.value !== '5' || !resyncSel.disabled) {
+            throw new Error('catalog resync not updated or not disabled in demo mode');
+        }
+    })().catch(err => { console.error(err); process.exitCode = 1; });
+});
+"#,
+            )
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(client_script::render("").as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "Demo settings UI test failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
