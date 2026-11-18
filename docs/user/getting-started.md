@@ -74,6 +74,13 @@ When `worker.enabled=true`, the Helm chart automatically wires a shared `FMD_INT
 
 For Helm deployments, set `server.basePath` to the same path prefix configured on the ingress, for example `--set server.basePath=/reader`. The ingress may forward the prefix unchanged or strip it before forwarding.
 
+To use an external PostgreSQL database instead of SQLite:
+
+```bash
+helm upgrade --install fmd3 ./charts/fmd3 \
+  --set server.env.FMD_DATABASE_URL="postgres://user:password@postgres-host:5432/fmd"
+```
+
 ---
 
 ## 3. Running from Binary (Native Linux / macOS)

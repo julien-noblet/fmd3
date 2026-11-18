@@ -23,6 +23,8 @@ server:
     RUST_LOG: "info"
     FMD_DEMO_MODE: "false"
     DEMO_SLOTS: "10"
+    # Optional database URL (defaults to SQLite at data/fmd.db when unset; supports postgres://...)
+    # FMD_DATABASE_URL: "postgres://user:pass@postgres:5432/fmd"
     # Optional runtime overrides (when set, they override DB/UI settings in both normal and demo modes):
     # FMD_MIN_DELAY_MS: "1000"
     # FMD_CHECK_INTERVAL_HOURS: "1"

@@ -2,16 +2,178 @@ use crate::auth::{generate_secure_token, hash_token, AuthContext, Role, User, Us
 use crate::cache::{MangaCacheItem, ModuleCachePolicy, TtlUnit};
 use crate::errors::{Error, Result};
 use chrono::Utc;
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+use sqlx::{
+    postgres::{PgConnectOptions, PgPoolOptions},
+    sqlite::SqlitePoolOptions,
+    Pool, Postgres, Row, Sqlite,
+};
 use std::path::Path;
+use std::str::FromStr;
 use tracing::info;
 
 #[derive(Clone)]
+enum DbBackend {
+    Sqlite(Pool<Sqlite>),
+    Postgres {
+        pool: Pool<Postgres>,
+        schema: Option<String>,
+    },
+}
+
+#[derive(Clone)]
 pub struct Database {
-    pool: Pool<Sqlite>,
+    backend: DbBackend,
+    database_url: String,
+}
+
+fn to_pg_sql(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut in_single_quote = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            out.push(c);
+            if in_single_quote && chars.peek() == Some(&'\'') {
+                out.push(chars.next().unwrap());
+            } else {
+                in_single_quote = !in_single_quote;
+            }
+            continue;
+        }
+        if !in_single_quote && c == '?' && chars.peek().is_some_and(|n| n.is_ascii_digit()) {
+            out.push('$');
+            while chars.peek().is_some_and(|n| n.is_ascii_digit()) {
+                out.push(chars.next().unwrap());
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+macro_rules! db_execute {
+    ($db:expr, $sql:expr $(, $arg:expr)* $(,)?) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                sqlx::query($sql)$(.bind($arg))*.execute(pool).await.map(|r| r.rows_affected())
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                sqlx::query(&pg_sql)$(.bind($arg))*.execute(pool).await.map(|r| r.rows_affected())
+            }
+        }
+    }};
+}
+
+macro_rules! db_fetch_all_map {
+    ($db:expr, $sql:expr, [$($arg:expr),* $(,)?], |$row:ident| $body:expr) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                let rows = sqlx::query($sql)$(.bind($arg))*.fetch_all(pool).await?;
+                Ok::<_, sqlx::Error>(rows.into_iter().map(|$row| $body).collect::<Vec<_>>())
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                let rows = sqlx::query(&pg_sql)$(.bind($arg))*.fetch_all(pool).await?;
+                Ok::<_, sqlx::Error>(rows.into_iter().map(|$row| $body).collect::<Vec<_>>())
+            }
+        }
+    }};
+}
+
+macro_rules! db_fetch_optional_map {
+    ($db:expr, $sql:expr, [$($arg:expr),* $(,)?], |$row:ident| $body:expr) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                let row = sqlx::query($sql)$(.bind($arg))*.fetch_optional(pool).await?;
+                Ok::<_, sqlx::Error>(row.map(|$row| $body))
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                let row = sqlx::query(&pg_sql)$(.bind($arg))*.fetch_optional(pool).await?;
+                Ok::<_, sqlx::Error>(row.map(|$row| $body))
+            }
+        }
+    }};
+}
+
+macro_rules! db_query_as_fetch_one {
+    ($db:expr, $ty:ty, $sql:expr $(, $arg:expr)* $(,)?) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, $ty>($sql)$(.bind($arg))*.fetch_one(pool).await
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                sqlx::query_as::<_, $ty>(&pg_sql)$(.bind($arg))*.fetch_one(pool).await
+            }
+        }
+    }};
+}
+
+macro_rules! db_query_as_fetch_optional {
+    ($db:expr, $ty:ty, $sql:expr $(, $arg:expr)* $(,)?) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, $ty>($sql)$(.bind($arg))*.fetch_optional(pool).await
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                sqlx::query_as::<_, $ty>(&pg_sql)$(.bind($arg))*.fetch_optional(pool).await
+            }
+        }
+    }};
+}
+
+macro_rules! db_query_as_fetch_all {
+    ($db:expr, $ty:ty, $sql:expr $(, $arg:expr)* $(,)?) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, $ty>($sql)$(.bind($arg))*.fetch_all(pool).await
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                sqlx::query_as::<_, $ty>(&pg_sql)$(.bind($arg))*.fetch_all(pool).await
+            }
+        }
+    }};
+}
+
+macro_rules! db_query_scalar_fetch_optional {
+    ($db:expr, $ty:ty, $sql:expr $(, $arg:expr)* $(,)?) => {{
+        match &$db.backend {
+            DbBackend::Sqlite(pool) => {
+                sqlx::query_scalar::<_, $ty>($sql)$(.bind($arg))*.fetch_optional(pool).await
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let pg_sql = to_pg_sql($sql);
+                sqlx::query_scalar::<_, $ty>(&pg_sql)$(.bind($arg))*.fetch_optional(pool).await
+            }
+        }
+    }};
 }
 
 impl Database {
+    pub fn is_postgres_url(url: &str) -> bool {
+        let lower = url.trim().to_ascii_lowercase();
+        lower.starts_with("postgres://") || lower.starts_with("postgresql://")
+    }
+
+    pub fn resolve_url(cli_override: Option<&str>, default_sqlite_path: &str) -> String {
+        if let Some(val) = cli_override.map(str::trim).filter(|s| !s.is_empty()) {
+            return val.to_string();
+        }
+        if let Ok(env_val) = std::env::var("FMD_DATABASE_URL") {
+            let trimmed = env_val.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        format!("sqlite://{}", default_sqlite_path)
+    }
+
     pub async fn new_in_memory() -> Result<Self> {
         let pool = SqlitePoolOptions::new()
             .min_connections(1)
@@ -20,7 +182,10 @@ impl Database {
             .max_lifetime(None)
             .connect_with(sqlx::sqlite::SqliteConnectOptions::new().in_memory(true))
             .await?;
-        let db = Self { pool };
+        let db = Self {
+            backend: DbBackend::Sqlite(pool),
+            database_url: "sqlite::memory:".to_string(),
+        };
         db.migrate().await?;
         Ok(db)
     }
@@ -31,26 +196,157 @@ impl Database {
             .to_str()
             .ok_or_else(|| Error::Custom("Invalid database path".into()))?;
 
+        if db_str == ":memory:" {
+            return Self::new_in_memory().await;
+        }
+
+        if Self::is_postgres_url(db_str) || db_str.starts_with("sqlite://") {
+            return Self::connect(db_str).await;
+        }
+
         if let Some(parent) = db_path.as_ref().parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
 
         let connection_string = format!("sqlite://{}?mode=rwc", db_str);
+        Self::connect(&connection_string).await
+    }
+
+    pub async fn connect(database_url: &str) -> Result<Self> {
+        let url = database_url.trim();
+        if url == ":memory:" || url == "sqlite::memory:" {
+            return Self::new_in_memory().await;
+        }
+        if Self::is_postgres_url(url) {
+            let options = PgConnectOptions::from_str(url)?;
+            let pool = PgPoolOptions::new()
+                .max_connections(10)
+                .connect_with(options)
+                .await?;
+            let db = Self {
+                backend: DbBackend::Postgres { pool, schema: None },
+                database_url: url.to_string(),
+            };
+            db.migrate().await?;
+            return Ok(db);
+        }
+
+        let conn_str = if let Some(rest) = url.strip_prefix("sqlite://") {
+            let file_part = rest.split('?').next().unwrap_or("");
+            if !file_part.is_empty() && file_part != ":memory:" {
+                if let Some(parent) = Path::new(file_part).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+            }
+            if rest.contains('?') {
+                url.to_string()
+            } else {
+                format!("{url}?mode=rwc")
+            }
+        } else {
+            if let Some(parent) = Path::new(url).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            format!("sqlite://{url}?mode=rwc")
+        };
+
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(&connection_string)
+            .connect(&conn_str)
             .await?;
 
-        let db = Self { pool };
+        let db = Self {
+            backend: DbBackend::Sqlite(pool),
+            database_url: conn_str,
+        };
         db.migrate().await?;
         Ok(db)
     }
 
-    pub fn pool(&self) -> &Pool<Sqlite> {
-        &self.pool
+    /// Creates an isolated ephemeral database for a demo visitor slot.
+    /// On PostgreSQL, creates a dedicated schema (`demo_slot_<uuid>`) and sets `search_path`.
+    /// On SQLite, uses an in-memory SQLite database.
+    pub async fn new_demo_slot(base_url: Option<&str>) -> Result<Self> {
+        let Some(url) = base_url.filter(|u| Self::is_postgres_url(u)) else {
+            return Self::new_in_memory().await;
+        };
+
+        let schema = format!("demo_slot_{}", uuid::Uuid::new_v4().simple());
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(PgConnectOptions::from_str(url)?)
+            .await?;
+        let create_stmt = format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"");
+        sqlx::query(&create_stmt).execute(&admin_pool).await?;
+        admin_pool.close().await;
+
+        let schema_for_hook = schema.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .after_connect(move |conn, _meta| {
+                let schema_name = schema_for_hook.clone();
+                Box::pin(async move {
+                    let stmt = format!("SET search_path TO \"{schema_name}\"");
+                    sqlx::query(&stmt).execute(conn).await?;
+                    Ok(())
+                })
+            })
+            .connect_with(PgConnectOptions::from_str(url)?)
+            .await?;
+
+        let db = Self {
+            backend: DbBackend::Postgres {
+                pool,
+                schema: Some(schema),
+            },
+            database_url: url.to_string(),
+        };
+        db.migrate().await?;
+        Ok(db)
+    }
+
+    pub fn is_postgres(&self) -> bool {
+        matches!(self.backend, DbBackend::Postgres { .. })
+    }
+
+    pub fn database_url(&self) -> &str {
+        &self.database_url
+    }
+
+    pub fn is_closed(&self) -> bool {
+        match &self.backend {
+            DbBackend::Sqlite(pool) => pool.is_closed(),
+            DbBackend::Postgres { pool, .. } => pool.is_closed(),
+        }
+    }
+
+    pub async fn close(&self) {
+        match &self.backend {
+            DbBackend::Sqlite(pool) => pool.close().await,
+            DbBackend::Postgres { pool, schema } => {
+                if let Some(schema_name) = schema {
+                    let drop_stmt = format!("DROP SCHEMA IF EXISTS \"{schema_name}\" CASCADE");
+                    let _ = sqlx::query(&drop_stmt).execute(pool).await;
+                }
+                pool.close().await;
+            }
+        }
     }
 
     pub async fn migrate(&self) -> Result<()> {
+        match &self.backend {
+            DbBackend::Sqlite(pool) => Self::migrate_sqlite(pool).await,
+            DbBackend::Postgres { pool, .. } => Self::migrate_postgres(pool).await,
+        }
+    }
+
+    async fn migrate_sqlite(pool: &Pool<Sqlite>) -> Result<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS mangas (
@@ -221,40 +517,193 @@ impl Database {
             );
             "#,
         )
-        .execute(&self.pool)
+        .execute(pool)
         .await?;
 
         let _ = sqlx::query(
             "ALTER TABLE favorites ADD COLUMN auto_download BOOLEAN NOT NULL DEFAULT 0",
         )
-        .execute(&self.pool)
+        .execute(pool)
         .await;
         let _ = sqlx::query(
             "ALTER TABLE favorites ADD COLUMN download_format TEXT NOT NULL DEFAULT 'CBZ'",
         )
-        .execute(&self.pool)
+        .execute(pool)
         .await;
         let _ = sqlx::query("ALTER TABLE favorites ADD COLUMN user_id TEXT DEFAULT NULL")
-            .execute(&self.pool)
+            .execute(pool)
             .await;
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id)")
-            .execute(&self.pool)
+            .execute(pool)
             .await;
         let _ =
             sqlx::query("ALTER TABLE downloads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
-                .execute(&self.pool)
+                .execute(pool)
                 .await;
         let _ =
             sqlx::query("ALTER TABLE downloads ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3")
-                .execute(&self.pool)
+                .execute(pool)
                 .await;
         let _ = sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_chapters_manga_url ON chapters(manga_id, url)",
         )
-        .execute(&self.pool)
+        .execute(pool)
         .await;
-        let _ = sqlx::query("INSERT OR IGNORE INTO module_cache_policies (module_id, ttl_value, ttl_unit, min_delay_ms) VALUES ('*', 24, 'hours', 1000)").execute(&self.pool).await;
+        let _ = sqlx::query("INSERT INTO module_cache_policies (module_id, ttl_value, ttl_unit, min_delay_ms) VALUES ('*', 24, 'hours', 1000) ON CONFLICT(module_id) DO NOTHING")
+            .execute(pool)
+            .await;
 
+        Ok(())
+    }
+
+    async fn migrate_postgres(pool: &Pool<Postgres>) -> Result<()> {
+        let statements = [
+            r#"CREATE TABLE IF NOT EXISTS mangas (
+                id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                original_url TEXT NOT NULL,
+                cover_url TEXT,
+                author TEXT,
+                artist TEXT,
+                description TEXT,
+                genres TEXT,
+                status TEXT NOT NULL DEFAULT 'unknown',
+                added_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"#,
+            r#"CREATE TABLE IF NOT EXISTS favorites (
+                manga_id TEXT PRIMARY KEY,
+                order_index BIGINT NOT NULL DEFAULT 0,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                current_chapter TEXT,
+                save_to TEXT,
+                last_checked_at TIMESTAMPTZ,
+                last_updated_at TIMESTAMPTZ,
+                auto_download BOOLEAN NOT NULL DEFAULT FALSE,
+                download_format TEXT NOT NULL DEFAULT 'CBZ',
+                user_id TEXT DEFAULT NULL,
+                FOREIGN KEY (manga_id) REFERENCES mangas(id) ON DELETE CASCADE
+            )"#,
+            "CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id)",
+            r#"CREATE TABLE IF NOT EXISTS chapters (
+                id TEXT PRIMARY KEY,
+                manga_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                chapter_number REAL NOT NULL DEFAULT 0,
+                url TEXT NOT NULL,
+                is_downloaded BOOLEAN NOT NULL DEFAULT FALSE,
+                downloaded_at TIMESTAMPTZ,
+                FOREIGN KEY (manga_id) REFERENCES mangas(id) ON DELETE CASCADE
+            )"#,
+            "CREATE INDEX IF NOT EXISTS idx_chapters_manga_url ON chapters(manga_id, url)",
+            r#"CREATE TABLE IF NOT EXISTS downloads (
+                id TEXT PRIMARY KEY,
+                manga_title TEXT NOT NULL,
+                chapter_title TEXT NOT NULL,
+                chapter_url TEXT NOT NULL,
+                module_id TEXT NOT NULL,
+                format TEXT NOT NULL DEFAULT 'Directory',
+                total_pages BIGINT NOT NULL DEFAULT 0,
+                downloaded_pages BIGINT NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                error_message TEXT,
+                retry_count BIGINT NOT NULL DEFAULT 0,
+                max_retries BIGINT NOT NULL DEFAULT 3,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"#,
+            r#"CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE IF NOT EXISTS catalog (
+                id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                link TEXT NOT NULL,
+                cover_url TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(module_id, link)
+            )"#,
+            "CREATE INDEX IF NOT EXISTS idx_catalog_module ON catalog(module_id)",
+            "CREATE INDEX IF NOT EXISTS idx_catalog_title ON catalog(title)",
+            "CREATE INDEX IF NOT EXISTS idx_catalog_title_fts ON catalog USING GIN (to_tsvector('simple', title))",
+            r#"CREATE TABLE IF NOT EXISTS module_sync_status (
+                module_id TEXT PRIMARY KEY,
+                total_mangas BIGINT NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'Idle',
+                last_synced_at TIMESTAMPTZ,
+                error_message TEXT
+            )"#,
+            r#"CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT,
+                role TEXT NOT NULL DEFAULT 'user',
+                sso_provider TEXT,
+                sso_subject TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TIMESTAMPTZ,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE
+            )"#,
+            r#"CREATE TABLE IF NOT EXISTS user_permissions (
+                user_id TEXT PRIMARY KEY,
+                can_download BOOLEAN NOT NULL DEFAULT TRUE,
+                can_manage_favorites BOOLEAN NOT NULL DEFAULT TRUE,
+                can_trigger_catalog_sync BOOLEAN NOT NULL DEFAULT TRUE,
+                can_force_refresh BOOLEAN NOT NULL DEFAULT TRUE,
+                can_view_modules BOOLEAN NOT NULL DEFAULT TRUE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )"#,
+            r#"CREATE TABLE IF NOT EXISTS user_sessions (
+                id TEXT PRIMARY KEY,
+                token_hash TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ NOT NULL,
+                last_active_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                user_agent TEXT,
+                ip_address TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )"#,
+            "CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON user_sessions(token_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON user_sessions(user_id)",
+            r#"CREATE TABLE IF NOT EXISTS api_tokens (
+                id TEXT PRIMARY KEY,
+                token_hash TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )"#,
+            "CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)",
+            r#"CREATE TABLE IF NOT EXISTS manga_cache (
+                manga_id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                cover_url TEXT,
+                metadata_json TEXT NOT NULL,
+                chapters_json TEXT NOT NULL,
+                cached_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ NOT NULL
+            )"#,
+            "CREATE INDEX IF NOT EXISTS idx_manga_cache_module ON manga_cache(module_id)",
+            r#"CREATE TABLE IF NOT EXISTS module_cache_policies (
+                module_id TEXT PRIMARY KEY,
+                ttl_value BIGINT NOT NULL DEFAULT 24,
+                ttl_unit TEXT NOT NULL DEFAULT 'hours',
+                min_delay_ms BIGINT NOT NULL DEFAULT 1000,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"#,
+            "INSERT INTO module_cache_policies (module_id, ttl_value, ttl_unit, min_delay_ms) VALUES ('*', 24, 'hours', 1000) ON CONFLICT(module_id) DO NOTHING",
+        ];
+
+        for stmt in statements {
+            sqlx::query(stmt).execute(pool).await?;
+        }
         Ok(())
     }
 
@@ -296,33 +745,41 @@ impl Database {
                 };
 
                 // Insert into mangas
-                sqlx::query(
+                db_execute!(
+                    self,
                     r#"
-                    INSERT OR REPLACE INTO mangas (id, module_id, title, original_url, status)
+                    INSERT INTO mangas (id, module_id, title, original_url, status)
                     VALUES (?1, ?2, ?3, ?4, 'ongoing')
+                    ON CONFLICT(id) DO UPDATE SET
+                        module_id = excluded.module_id,
+                        title = excluded.title,
+                        original_url = excluded.original_url,
+                        status = excluded.status
                     "#,
-                )
-                .bind(&manga_id)
-                .bind(&module_id)
-                .bind(&title)
-                .bind(&link)
-                .execute(&self.pool)
-                .await?;
+                    &manga_id,
+                    &module_id,
+                    &title,
+                    &link,
+                )?;
 
                 // Insert into favorites
-                sqlx::query(
+                db_execute!(
+                    self,
                     r#"
-                    INSERT OR REPLACE INTO favorites (manga_id, order_index, enabled, current_chapter, save_to)
+                    INSERT INTO favorites (manga_id, order_index, enabled, current_chapter, save_to)
                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(manga_id) DO UPDATE SET
+                        order_index = excluded.order_index,
+                        enabled = excluded.enabled,
+                        current_chapter = excluded.current_chapter,
+                        save_to = excluded.save_to
                     "#,
-                )
-                .bind(&manga_id)
-                .bind(order_index)
-                .bind(enabled)
-                .bind(current_chapter)
-                .bind(save_to)
-                .execute(&self.pool)
-                .await?;
+                    &manga_id,
+                    order_index,
+                    enabled,
+                    current_chapter,
+                    save_to,
+                )?;
 
                 count += 1;
             }
@@ -342,17 +799,17 @@ impl Database {
                     let ch_title = line.trim();
                     if !ch_title.is_empty() {
                         let ch_id = format!("{}:{}", id, ch_title);
-                        let _ = sqlx::query(
+                        let _ = db_execute!(
+                            self,
                             r#"
-                            INSERT OR IGNORE INTO chapters (id, manga_id, title, chapter_number, url, is_downloaded)
-                            VALUES (?1, ?2, ?3, 0.0, '', 1)
+                            INSERT INTO chapters (id, manga_id, title, chapter_number, url, is_downloaded)
+                            VALUES (?1, ?2, ?3, 0.0, '', TRUE)
+                            ON CONFLICT(id) DO NOTHING
                             "#,
-                        )
-                        .bind(&ch_id)
-                        .bind(&id)
-                        .bind(ch_title)
-                        .execute(&self.pool)
-                        .await;
+                            &ch_id,
+                            &id,
+                            ch_title,
+                        );
                     }
                 }
             }
@@ -367,31 +824,59 @@ impl Database {
         module_id: &str,
         items: &[(String, String)], // (title, link)
     ) -> Result<usize> {
-        let mut tx = self.pool.begin().await?;
         let mut inserted = 0;
-        for (title, link) in items {
-            let id = format!("{}:{}", module_id, link);
-            let res = sqlx::query(
-                r#"
-                INSERT INTO catalog (id, module_id, title, link, updated_at)
-                VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
-                ON CONFLICT(module_id, link) DO UPDATE SET
-                    title = excluded.title,
-                    updated_at = CURRENT_TIMESTAMP
-                "#,
-            )
-            .bind(&id)
-            .bind(module_id)
-            .bind(title)
-            .bind(link)
-            .execute(&mut *tx)
-            .await?;
-
-            if res.rows_affected() > 0 {
-                inserted += 1;
+        match &self.backend {
+            DbBackend::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                for (title, link) in items {
+                    let id = format!("{}:{}", module_id, link);
+                    let res = sqlx::query(
+                        r#"
+                        INSERT INTO catalog (id, module_id, title, link, updated_at)
+                        VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+                        ON CONFLICT(module_id, link) DO UPDATE SET
+                            title = excluded.title,
+                            updated_at = CURRENT_TIMESTAMP
+                        "#,
+                    )
+                    .bind(&id)
+                    .bind(module_id)
+                    .bind(title)
+                    .bind(link)
+                    .execute(&mut *tx)
+                    .await?;
+                    if res.rows_affected() > 0 {
+                        inserted += 1;
+                    }
+                }
+                tx.commit().await?;
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let mut tx = pool.begin().await?;
+                for (title, link) in items {
+                    let id = format!("{}:{}", module_id, link);
+                    let res = sqlx::query(
+                        r#"
+                        INSERT INTO catalog (id, module_id, title, link, updated_at)
+                        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                        ON CONFLICT(module_id, link) DO UPDATE SET
+                            title = excluded.title,
+                            updated_at = CURRENT_TIMESTAMP
+                        "#,
+                    )
+                    .bind(&id)
+                    .bind(module_id)
+                    .bind(title)
+                    .bind(link)
+                    .execute(&mut *tx)
+                    .await?;
+                    if res.rows_affected() > 0 {
+                        inserted += 1;
+                    }
+                }
+                tx.commit().await?;
             }
         }
-        tx.commit().await?;
         Ok(inserted)
     }
 
@@ -409,18 +894,19 @@ impl Database {
         if q.is_empty() {
             // No search query: browse by module or all
             let total_row: (i64,) = if let Some(m_id) = module_id {
-                sqlx::query_as("SELECT COUNT(*) FROM catalog WHERE module_id = ?1")
-                    .bind(m_id)
-                    .fetch_one(&self.pool)
-                    .await?
+                db_query_as_fetch_one!(
+                    self,
+                    (i64,),
+                    "SELECT COUNT(*) FROM catalog WHERE module_id = ?1",
+                    m_id
+                )?
             } else {
-                sqlx::query_as("SELECT COUNT(*) FROM catalog")
-                    .fetch_one(&self.pool)
-                    .await?
+                db_query_as_fetch_one!(self, (i64,), "SELECT COUNT(*) FROM catalog")?
             };
 
-            let rows = if let Some(m_id) = module_id {
-                sqlx::query(
+            let items = if let Some(m_id) = module_id {
+                db_fetch_all_map!(
+                    self,
                     r#"
                     SELECT id, module_id, title, link, cover_url, updated_at
                     FROM catalog
@@ -428,199 +914,268 @@ impl Database {
                     ORDER BY title ASC
                     LIMIT ?2 OFFSET ?3
                     "#,
-                )
-                .bind(m_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
+                    [m_id, limit, offset],
+                    |r| crate::models::CatalogItem {
+                        id: r.get("id"),
+                        module_id: r.get("module_id"),
+                        title: r.get("title"),
+                        link: r.get("link"),
+                        cover_url: r.get("cover_url"),
+                        updated_at: r.get("updated_at"),
+                    }
+                )?
             } else {
-                sqlx::query(
+                db_fetch_all_map!(
+                    self,
                     r#"
                     SELECT id, module_id, title, link, cover_url, updated_at
                     FROM catalog
                     ORDER BY title ASC
                     LIMIT ?1 OFFSET ?2
                     "#,
-                )
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
+                    [limit, offset],
+                    |r| crate::models::CatalogItem {
+                        id: r.get("id"),
+                        module_id: r.get("module_id"),
+                        title: r.get("title"),
+                        link: r.get("link"),
+                        cover_url: r.get("cover_url"),
+                        updated_at: r.get("updated_at"),
+                    }
+                )?
             };
-
-            let items = rows
-                .into_iter()
-                .map(|r| crate::models::CatalogItem {
-                    id: r.get("id"),
-                    module_id: r.get("module_id"),
-                    title: r.get("title"),
-                    link: r.get("link"),
-                    cover_url: r.get("cover_url"),
-                    updated_at: r.get("updated_at"),
-                })
-                .collect();
 
             return Ok((items, total_row.0));
         }
 
-        // FTS5 search with fallback to LIKE
-        let fts_query = q
-            .split_whitespace()
-            .map(|word| {
-                let clean: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
-                if clean.is_empty() {
-                    String::new()
-                } else {
-                    format!("\"{}\"*", clean)
-                }
-            })
-            .filter(|w| !w.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        // Full-text search: FTS5 on SQLite, GIN tsvector on PostgreSQL, with LIKE/ILIKE fallback
+        match &self.backend {
+            DbBackend::Sqlite(pool) => {
+                let fts_query = q
+                    .split_whitespace()
+                    .map(|word| {
+                        let clean: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+                        if clean.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\"{}\"*", clean)
+                        }
+                    })
+                    .filter(|w| !w.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
 
-        let fts_res = if !fts_query.is_empty() {
-            if let Some(m_id) = module_id {
-                sqlx::query(
-                    r#"
-                    SELECT c.id, c.module_id, c.title, c.link, c.cover_url, c.updated_at
-                    FROM catalog_fts f
-                    JOIN catalog c ON c.rowid = f.rowid
-                    WHERE catalog_fts MATCH ?1 AND c.module_id = ?2
-                    ORDER BY rank
-                    LIMIT ?3 OFFSET ?4
-                    "#,
-                )
-                .bind(&fts_query)
-                .bind(m_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await
-            } else {
-                sqlx::query(
-                    r#"
-                    SELECT c.id, c.module_id, c.title, c.link, c.cover_url, c.updated_at
-                    FROM catalog_fts f
-                    JOIN catalog c ON c.rowid = f.rowid
-                    WHERE catalog_fts MATCH ?1
-                    ORDER BY rank
-                    LIMIT ?2 OFFSET ?3
-                    "#,
-                )
-                .bind(&fts_query)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await
+                let fts_res = if !fts_query.is_empty() {
+                    if let Some(m_id) = module_id {
+                        sqlx::query(
+                            r#"
+                            SELECT c.id, c.module_id, c.title, c.link, c.cover_url, c.updated_at
+                            FROM catalog_fts f
+                            JOIN catalog c ON c.rowid = f.rowid
+                            WHERE catalog_fts MATCH ?1 AND c.module_id = ?2
+                            ORDER BY rank
+                            LIMIT ?3 OFFSET ?4
+                            "#,
+                        )
+                        .bind(&fts_query)
+                        .bind(m_id)
+                        .bind(limit)
+                        .bind(offset)
+                        .fetch_all(pool)
+                        .await
+                    } else {
+                        sqlx::query(
+                            r#"
+                            SELECT c.id, c.module_id, c.title, c.link, c.cover_url, c.updated_at
+                            FROM catalog_fts f
+                            JOIN catalog c ON c.rowid = f.rowid
+                            WHERE catalog_fts MATCH ?1
+                            ORDER BY rank
+                            LIMIT ?2 OFFSET ?3
+                            "#,
+                        )
+                        .bind(&fts_query)
+                        .bind(limit)
+                        .bind(offset)
+                        .fetch_all(pool)
+                        .await
+                    }
+                } else {
+                    Err(sqlx::Error::RowNotFound)
+                };
+
+                if let Ok(rows) = fts_res {
+                    let total_count: (i64,) = if let Some(m_id) = module_id {
+                        sqlx::query_as(
+                            r#"
+                            SELECT COUNT(*)
+                            FROM catalog_fts f
+                            JOIN catalog c ON c.rowid = f.rowid
+                            WHERE catalog_fts MATCH ?1 AND c.module_id = ?2
+                            "#,
+                        )
+                        .bind(&fts_query)
+                        .bind(m_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or((rows.len() as i64,))
+                    } else {
+                        sqlx::query_as(
+                            r#"
+                            SELECT COUNT(*)
+                            FROM catalog_fts f
+                            WHERE catalog_fts MATCH ?1
+                            "#,
+                        )
+                        .bind(&fts_query)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or((rows.len() as i64,))
+                    };
+
+                    let items = rows
+                        .into_iter()
+                        .map(|r| crate::models::CatalogItem {
+                            id: r.get("id"),
+                            module_id: r.get("module_id"),
+                            title: r.get("title"),
+                            link: r.get("link"),
+                            cover_url: r.get("cover_url"),
+                            updated_at: r.get("updated_at"),
+                        })
+                        .collect();
+
+                    return Ok((items, total_count.0));
+                }
             }
+            DbBackend::Postgres { pool, .. } => {
+                let ts_res = if let Some(m_id) = module_id {
+                    sqlx::query(
+                        r#"
+                        SELECT id, module_id, title, link, cover_url, updated_at
+                        FROM catalog
+                        WHERE to_tsvector('simple', title) @@ plainto_tsquery('simple', $1)
+                          AND module_id = $2
+                        ORDER BY ts_rank(to_tsvector('simple', title), plainto_tsquery('simple', $1)) DESC, title ASC
+                        LIMIT $3 OFFSET $4
+                        "#,
+                    )
+                    .bind(q)
+                    .bind(m_id)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(pool)
+                    .await
+                } else {
+                    sqlx::query(
+                        r#"
+                        SELECT id, module_id, title, link, cover_url, updated_at
+                        FROM catalog
+                        WHERE to_tsvector('simple', title) @@ plainto_tsquery('simple', $1)
+                        ORDER BY ts_rank(to_tsvector('simple', title), plainto_tsquery('simple', $1)) DESC, title ASC
+                        LIMIT $2 OFFSET $3
+                        "#,
+                    )
+                    .bind(q)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(pool)
+                    .await
+                };
+
+                if let Ok(rows) = ts_res {
+                    if !rows.is_empty() {
+                        let total_count: (i64,) = if let Some(m_id) = module_id {
+                            sqlx::query_as(
+                                r#"
+                                SELECT COUNT(*)
+                                FROM catalog
+                                WHERE to_tsvector('simple', title) @@ plainto_tsquery('simple', $1)
+                                  AND module_id = $2
+                                "#,
+                            )
+                            .bind(q)
+                            .bind(m_id)
+                            .fetch_one(pool)
+                            .await
+                            .unwrap_or((rows.len() as i64,))
+                        } else {
+                            sqlx::query_as(
+                                r#"
+                                SELECT COUNT(*)
+                                FROM catalog
+                                WHERE to_tsvector('simple', title) @@ plainto_tsquery('simple', $1)
+                                "#,
+                            )
+                            .bind(q)
+                            .fetch_one(pool)
+                            .await
+                            .unwrap_or((rows.len() as i64,))
+                        };
+
+                        let items = rows
+                            .into_iter()
+                            .map(|r| crate::models::CatalogItem {
+                                id: r.get("id"),
+                                module_id: r.get("module_id"),
+                                title: r.get("title"),
+                                link: r.get("link"),
+                                cover_url: r.get("cover_url"),
+                                updated_at: r.get("updated_at"),
+                            })
+                            .collect();
+
+                        return Ok((items, total_count.0));
+                    }
+                }
+            }
+        }
+
+        // Substring LIKE / ILIKE fallback
+        let like_pat = format!("%{}%", q);
+        let like_op = if self.is_postgres() { "ILIKE" } else { "LIKE" };
+        let count_sql_mod =
+            format!("SELECT COUNT(*) FROM catalog WHERE module_id = ?1 AND title {like_op} ?2");
+        let count_sql_all = format!("SELECT COUNT(*) FROM catalog WHERE title {like_op} ?1");
+        let select_sql_mod = format!(
+            "SELECT id, module_id, title, link, cover_url, updated_at FROM catalog WHERE module_id = ?1 AND title {like_op} ?2 ORDER BY title ASC LIMIT ?3 OFFSET ?4"
+        );
+        let select_sql_all = format!(
+            "SELECT id, module_id, title, link, cover_url, updated_at FROM catalog WHERE title {like_op} ?1 ORDER BY title ASC LIMIT ?2 OFFSET ?3"
+        );
+
+        let total_row: (i64,) = if let Some(m_id) = module_id {
+            db_query_as_fetch_one!(self, (i64,), &count_sql_mod, m_id, &like_pat)?
         } else {
-            Err(sqlx::Error::RowNotFound)
+            db_query_as_fetch_one!(self, (i64,), &count_sql_all, &like_pat)?
         };
 
-        if let Ok(rows) = fts_res {
-            let total_count: (i64,) = if let Some(m_id) = module_id {
-                sqlx::query_as(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM catalog_fts f
-                    JOIN catalog c ON c.rowid = f.rowid
-                    WHERE catalog_fts MATCH ?1 AND c.module_id = ?2
-                    "#,
-                )
-                .bind(&fts_query)
-                .bind(m_id)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or((rows.len() as i64,))
-            } else {
-                sqlx::query_as(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM catalog_fts f
-                    WHERE catalog_fts MATCH ?1
-                    "#,
-                )
-                .bind(&fts_query)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or((rows.len() as i64,))
-            };
-
-            let items = rows
-                .into_iter()
-                .map(|r| crate::models::CatalogItem {
+        let items = if let Some(m_id) = module_id {
+            db_fetch_all_map!(
+                self,
+                &select_sql_mod,
+                [m_id, &like_pat, limit, offset],
+                |r| crate::models::CatalogItem {
                     id: r.get("id"),
                     module_id: r.get("module_id"),
                     title: r.get("title"),
                     link: r.get("link"),
                     cover_url: r.get("cover_url"),
                     updated_at: r.get("updated_at"),
-                })
-                .collect();
-
-            return Ok((items, total_count.0));
-        }
-
-        // Substring LIKE fallback
-        let like_pat = format!("%{}%", q);
-        let total_row: (i64,) = if let Some(m_id) = module_id {
-            sqlx::query_as("SELECT COUNT(*) FROM catalog WHERE module_id = ?1 AND title LIKE ?2")
-                .bind(m_id)
-                .bind(&like_pat)
-                .fetch_one(&self.pool)
-                .await?
+                }
+            )?
         } else {
-            sqlx::query_as("SELECT COUNT(*) FROM catalog WHERE title LIKE ?1")
-                .bind(&like_pat)
-                .fetch_one(&self.pool)
-                .await?
+            db_fetch_all_map!(self, &select_sql_all, [&like_pat, limit, offset], |r| {
+                crate::models::CatalogItem {
+                    id: r.get("id"),
+                    module_id: r.get("module_id"),
+                    title: r.get("title"),
+                    link: r.get("link"),
+                    cover_url: r.get("cover_url"),
+                    updated_at: r.get("updated_at"),
+                }
+            })?
         };
-
-        let rows = if let Some(m_id) = module_id {
-            sqlx::query(
-                r#"
-                SELECT id, module_id, title, link, cover_url, updated_at
-                FROM catalog
-                WHERE module_id = ?1 AND title LIKE ?2
-                ORDER BY title ASC
-                LIMIT ?3 OFFSET ?4
-                "#,
-            )
-            .bind(m_id)
-            .bind(&like_pat)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                r#"
-                SELECT id, module_id, title, link, cover_url, updated_at
-                FROM catalog
-                WHERE title LIKE ?1
-                ORDER BY title ASC
-                LIMIT ?2 OFFSET ?3
-                "#,
-            )
-            .bind(&like_pat)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?
-        };
-
-        let items = rows
-            .into_iter()
-            .map(|r| crate::models::CatalogItem {
-                id: r.get("id"),
-                module_id: r.get("module_id"),
-                title: r.get("title"),
-                link: r.get("link"),
-                cover_url: r.get("cover_url"),
-                updated_at: r.get("updated_at"),
-            })
-            .collect();
 
         Ok((items, total_row.0))
     }
@@ -629,24 +1184,19 @@ impl Database {
         &self,
         module_id: &str,
     ) -> Result<Option<crate::models::ModuleSyncStatus>> {
-        let row_opt = sqlx::query(
-            "SELECT module_id, total_mangas, status, last_synced_at, error_message FROM module_sync_status WHERE module_id = ?1"
-        )
-        .bind(module_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(r) = row_opt {
-            Ok(Some(crate::models::ModuleSyncStatus {
+        let item = db_fetch_optional_map!(
+            self,
+            "SELECT module_id, total_mangas, status, last_synced_at, error_message FROM module_sync_status WHERE module_id = ?1",
+            [module_id],
+            |r| crate::models::ModuleSyncStatus {
                 module_id: r.get("module_id"),
                 total_mangas: r.get("total_mangas"),
                 status: r.get("status"),
                 last_synced_at: r.get("last_synced_at"),
                 error_message: r.get("error_message"),
-            }))
-        } else {
-            Ok(None)
-        }
+            }
+        )?;
+        Ok(item)
     }
 
     pub async fn set_module_sync_status(
@@ -657,7 +1207,8 @@ impl Database {
         total_mangas: Option<i64>,
     ) -> Result<()> {
         let total = total_mangas.unwrap_or(0);
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO module_sync_status (module_id, total_mangas, status, last_synced_at, error_message)
             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, ?4)
@@ -666,42 +1217,34 @@ impl Database {
                 last_synced_at = CURRENT_TIMESTAMP,
                 error_message = excluded.error_message,
                 total_mangas = CASE WHEN excluded.total_mangas > 0 THEN excluded.total_mangas ELSE module_sync_status.total_mangas END
-            "#
-        )
-        .bind(module_id)
-        .bind(total)
-        .bind(status)
-        .bind(error_message)
-        .execute(&self.pool)
-        .await?;
+            "#,
+            module_id,
+            total,
+            status,
+            error_message,
+        )?;
 
         Ok(())
     }
 
     pub async fn list_all_sync_statuses(&self) -> Result<Vec<crate::models::ModuleSyncStatus>> {
-        let rows = sqlx::query(
-            "SELECT module_id, total_mangas, status, last_synced_at, error_message FROM module_sync_status"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut list = Vec::new();
-        for r in rows {
-            list.push(crate::models::ModuleSyncStatus {
+        let list = db_fetch_all_map!(
+            self,
+            "SELECT module_id, total_mangas, status, last_synced_at, error_message FROM module_sync_status",
+            [],
+            |r| crate::models::ModuleSyncStatus {
                 module_id: r.get("module_id"),
                 total_mangas: r.get("total_mangas"),
                 status: r.get("status"),
                 last_synced_at: r.get("last_synced_at"),
                 error_message: r.get("error_message"),
-            });
-        }
+            }
+        )?;
         Ok(list)
     }
 
     pub async fn get_catalog_total_count(&self) -> Result<i64> {
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM catalog")
-            .fetch_one(&self.pool)
-            .await?;
+        let row: (i64,) = db_query_as_fetch_one!(self, (i64,), "SELECT COUNT(*) FROM catalog")?;
         Ok(row.0)
     }
 
@@ -718,7 +1261,8 @@ impl Database {
         genres: Option<&[String]>,
     ) -> Result<()> {
         let genres_json = genres.map(|g| serde_json::to_string(g).unwrap_or_default());
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO mangas (id, module_id, title, original_url, cover_url, author, description, genres, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
@@ -731,17 +1275,15 @@ impl Database {
                 genres = COALESCE(excluded.genres, mangas.genres),
                 updated_at = CURRENT_TIMESTAMP
             "#,
-        )
-        .bind(manga_id)
-        .bind(module_id)
-        .bind(title)
-        .bind(original_url)
-        .bind(cover_url)
-        .bind(author)
-        .bind(description)
-        .bind(genres_json)
-        .execute(&self.pool)
-        .await?;
+            manga_id,
+            module_id,
+            title,
+            original_url,
+            cover_url,
+            author,
+            description,
+            genres_json,
+        )?;
 
         Ok(())
     }
@@ -817,11 +1359,8 @@ impl Database {
         auto_download: bool,
         download_format: &str,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
         let genres_json = genres.map(|g| serde_json::to_string(g).unwrap_or_default());
-
-        sqlx::query(
-            r#"
+        let manga_sql = r#"
             INSERT INTO mangas (id, module_id, title, original_url, cover_url, author, description, genres, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
@@ -832,37 +1371,62 @@ impl Database {
                 description = COALESCE(excluded.description, mangas.description),
                 genres = COALESCE(excluded.genres, mangas.genres),
                 updated_at = CURRENT_TIMESTAMP
-            "#,
-        )
-        .bind(manga_id)
-        .bind(module_id)
-        .bind(title)
-        .bind(original_url)
-        .bind(cover_url)
-        .bind(author)
-        .bind(description)
-        .bind(genres_json)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            r#"
+            "#;
+        let fav_sql = r#"
             INSERT INTO favorites (manga_id, user_id, enabled, auto_download, download_format, last_checked_at, last_updated_at)
-            VALUES (?1, ?2, 1, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?1, ?2, TRUE, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(manga_id) DO UPDATE SET
                 user_id = COALESCE(favorites.user_id, excluded.user_id),
                 auto_download = excluded.auto_download,
                 download_format = excluded.download_format
-            "#,
-        )
-        .bind(manga_id)
-        .bind(user_id)
-        .bind(auto_download)
-        .bind(download_format)
-        .execute(&mut *tx)
-        .await?;
+            "#;
 
-        tx.commit().await?;
+        match &self.backend {
+            DbBackend::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(manga_sql)
+                    .bind(manga_id)
+                    .bind(module_id)
+                    .bind(title)
+                    .bind(original_url)
+                    .bind(cover_url)
+                    .bind(author)
+                    .bind(description)
+                    .bind(&genres_json)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(fav_sql)
+                    .bind(manga_id)
+                    .bind(user_id)
+                    .bind(auto_download)
+                    .bind(download_format)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(&to_pg_sql(manga_sql))
+                    .bind(manga_id)
+                    .bind(module_id)
+                    .bind(title)
+                    .bind(original_url)
+                    .bind(cover_url)
+                    .bind(author)
+                    .bind(description)
+                    .bind(&genres_json)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(&to_pg_sql(fav_sql))
+                    .bind(manga_id)
+                    .bind(user_id)
+                    .bind(auto_download)
+                    .bind(download_format)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+        }
         Ok(())
     }
 
@@ -872,32 +1436,53 @@ impl Database {
         chapters: &[crate::models::ChapterItem],
         mark_as_downloaded: bool,
     ) -> Result<usize> {
-        let mut tx = self.pool.begin().await?;
         let mut count = 0;
-        for ch in chapters {
-            let ch_id = format!("{}:{}", manga_id, ch.url);
-            let res = sqlx::query(
-                r#"
-                INSERT INTO chapters (id, manga_id, title, url, is_downloaded, downloaded_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?5 = 1 THEN CURRENT_TIMESTAMP ELSE NULL END)
-                ON CONFLICT(id) DO UPDATE SET
-                    title = excluded.title,
-                    is_downloaded = CASE WHEN excluded.is_downloaded = 1 THEN 1 ELSE chapters.is_downloaded END
-                "#,
-            )
-            .bind(&ch_id)
-            .bind(manga_id)
-            .bind(&ch.title)
-            .bind(&ch.url)
-            .bind(mark_as_downloaded)
-            .execute(&mut *tx)
-            .await?;
-
-            if res.rows_affected() > 0 {
-                count += 1;
+        let sql = r#"
+            INSERT INTO chapters (id, manga_id, title, url, is_downloaded, downloaded_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?5 THEN CURRENT_TIMESTAMP ELSE NULL END)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                is_downloaded = CASE WHEN excluded.is_downloaded THEN TRUE ELSE chapters.is_downloaded END
+            "#;
+        match &self.backend {
+            DbBackend::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                for ch in chapters {
+                    let ch_id = format!("{}:{}", manga_id, ch.url);
+                    let res = sqlx::query(sql)
+                        .bind(&ch_id)
+                        .bind(manga_id)
+                        .bind(&ch.title)
+                        .bind(&ch.url)
+                        .bind(mark_as_downloaded)
+                        .execute(&mut *tx)
+                        .await?;
+                    if res.rows_affected() > 0 {
+                        count += 1;
+                    }
+                }
+                tx.commit().await?;
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let mut tx = pool.begin().await?;
+                let pg_sql = to_pg_sql(sql);
+                for ch in chapters {
+                    let ch_id = format!("{}:{}", manga_id, ch.url);
+                    let res = sqlx::query(&pg_sql)
+                        .bind(&ch_id)
+                        .bind(manga_id)
+                        .bind(&ch.title)
+                        .bind(&ch.url)
+                        .bind(mark_as_downloaded)
+                        .execute(&mut *tx)
+                        .await?;
+                    if res.rows_affected() > 0 {
+                        count += 1;
+                    }
+                }
+                tx.commit().await?;
             }
         }
-        tx.commit().await?;
         Ok(count)
     }
 
@@ -906,15 +1491,13 @@ impl Database {
         manga_id: &str,
         fetched_chapters: &[crate::models::ChapterItem],
     ) -> Result<Vec<crate::models::ChapterItem>> {
-        let rows = sqlx::query("SELECT url FROM chapters WHERE manga_id = ?1")
-            .bind(manga_id)
-            .fetch_all(&self.pool)
-            .await?;
-
-        let known_urls: std::collections::HashSet<String> = rows
-            .into_iter()
-            .map(|r| r.get::<String, _>("url"))
-            .collect();
+        let urls = db_fetch_all_map!(
+            self,
+            "SELECT url FROM chapters WHERE manga_id = ?1",
+            [manga_id],
+            |r| r.get::<String, _>("url")
+        )?;
+        let known_urls: std::collections::HashSet<String> = urls.into_iter().collect();
 
         let mut new_chapters = Vec::new();
         for ch in fetched_chapters {
@@ -925,17 +1508,17 @@ impl Database {
 
         if !new_chapters.is_empty() {
             self.record_chapters(manga_id, &new_chapters, false).await?;
-            sqlx::query("UPDATE favorites SET last_checked_at = CURRENT_TIMESTAMP, last_updated_at = CURRENT_TIMESTAMP WHERE manga_id = ?1")
-                .bind(manga_id)
-                .execute(&self.pool)
-                .await?;
+            db_execute!(
+                self,
+                "UPDATE favorites SET last_checked_at = CURRENT_TIMESTAMP, last_updated_at = CURRENT_TIMESTAMP WHERE manga_id = ?1",
+                manga_id,
+            )?;
         } else {
-            sqlx::query(
+            db_execute!(
+                self,
                 "UPDATE favorites SET last_checked_at = CURRENT_TIMESTAMP WHERE manga_id = ?1",
-            )
-            .bind(manga_id)
-            .execute(&self.pool)
-            .await?;
+                manga_id,
+            )?;
         }
 
         Ok(new_chapters)
@@ -943,35 +1526,33 @@ impl Database {
 
     pub async fn mark_chapter_downloaded(&self, manga_id: &str, chapter_url: &str) -> Result<()> {
         let ch_id = format!("{}:{}", manga_id, chapter_url);
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
-            UPDATE chapters 
-            SET is_downloaded = 1, downloaded_at = CURRENT_TIMESTAMP 
+            UPDATE chapters
+            SET is_downloaded = TRUE, downloaded_at = CURRENT_TIMESTAMP
             WHERE (id = ?1 AND ?1 != '') OR (manga_id = ?2 AND url = ?3) OR url = ?3
             "#,
-        )
-        .bind(&ch_id)
-        .bind(manga_id)
-        .bind(chapter_url)
-        .execute(&self.pool)
-        .await?;
+            &ch_id,
+            manga_id,
+            chapter_url,
+        )?;
 
         Ok(())
     }
 
     pub async fn reconcile_downloaded_chapters(&self) -> Result<usize> {
-        let res = sqlx::query(
+        let affected = db_execute!(
+            self,
             r#"
-            UPDATE chapters 
-            SET is_downloaded = 0, downloaded_at = NULL 
-            WHERE is_downloaded = 1 
+            UPDATE chapters
+            SET is_downloaded = FALSE, downloaded_at = NULL
+            WHERE is_downloaded = TRUE
               AND url NOT IN (SELECT chapter_url FROM downloads WHERE status = 'Completed')
             "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        )?;
 
-        Ok(res.rows_affected() as usize)
+        Ok(affected as usize)
     }
 
     pub async fn list_favorites_with_stats(&self) -> Result<Vec<crate::models::Favorite>> {
@@ -982,89 +1563,97 @@ impl Database {
         &self,
         user_id: Option<&str>,
     ) -> Result<Vec<crate::models::Favorite>> {
-        let rows = match user_id {
-            Some(uid) => {
-                sqlx::query(
-                    r#"
-                    SELECT 
-                        f.manga_id, 
-                        m.title, 
-                        m.module_id,
-                        m.original_url, 
-                        m.cover_url, 
-                        f.order_index, 
-                        f.enabled, 
-                        COALESCE(f.auto_download, 0) as auto_download,
-                        COALESCE(f.download_format, 'CBZ') as download_format,
-                        f.current_chapter, 
-                        f.save_to,
-                        f.last_checked_at,
-                        f.last_updated_at,
-                        COUNT(c.id) as total_chapters,
-                        COALESCE(SUM(CASE WHEN c.is_downloaded = 1 THEN 1 ELSE 0 END), 0) as downloaded_count
-                    FROM favorites f
-                    JOIN mangas m ON m.id = f.manga_id
-                    LEFT JOIN chapters c ON c.manga_id = f.manga_id
-                    WHERE f.user_id = ?1 OR f.user_id IS NULL
-                    GROUP BY f.manga_id
-                    ORDER BY f.order_index, f.last_updated_at DESC
-                    "#,
-                )
-                .bind(uid)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    r#"
-                    SELECT 
-                        f.manga_id, 
-                        m.title, 
-                        m.module_id,
-                        m.original_url, 
-                        m.cover_url, 
-                        f.order_index, 
-                        f.enabled, 
-                        COALESCE(f.auto_download, 0) as auto_download,
-                        COALESCE(f.download_format, 'CBZ') as download_format,
-                        f.current_chapter, 
-                        f.save_to,
-                        f.last_checked_at,
-                        f.last_updated_at,
-                        COUNT(c.id) as total_chapters,
-                        COALESCE(SUM(CASE WHEN c.is_downloaded = 1 THEN 1 ELSE 0 END), 0) as downloaded_count
-                    FROM favorites f
-                    JOIN mangas m ON m.id = f.manga_id
-                    LEFT JOIN chapters c ON c.manga_id = f.manga_id
-                    GROUP BY f.manga_id
-                    ORDER BY f.order_index, f.last_updated_at DESC
-                    "#,
-                )
-                .fetch_all(&self.pool)
-                .await?
-            }
+        let favs = match user_id {
+            Some(uid) => db_fetch_all_map!(
+                self,
+                r#"
+                SELECT
+                    f.manga_id,
+                    m.title,
+                    m.module_id,
+                    m.original_url,
+                    m.cover_url,
+                    f.order_index,
+                    f.enabled,
+                    COALESCE(f.auto_download, FALSE) as auto_download,
+                    COALESCE(f.download_format, 'CBZ') as download_format,
+                    f.current_chapter,
+                    f.save_to,
+                    f.last_checked_at,
+                    f.last_updated_at,
+                    COUNT(c.id) as total_chapters,
+                    COUNT(CASE WHEN c.is_downloaded THEN 1 END) as downloaded_count
+                FROM favorites f
+                JOIN mangas m ON m.id = f.manga_id
+                LEFT JOIN chapters c ON c.manga_id = f.manga_id
+                WHERE f.user_id = ?1 OR f.user_id IS NULL
+                GROUP BY f.manga_id, m.id
+                ORDER BY f.order_index, f.last_updated_at DESC
+                "#,
+                [uid],
+                |r| crate::models::Favorite {
+                    manga_id: r.get("manga_id"),
+                    title: r.get("title"),
+                    module_id: r.get("module_id"),
+                    original_url: r.get("original_url"),
+                    cover_url: r.get("cover_url"),
+                    order_index: r.get("order_index"),
+                    enabled: r.get("enabled"),
+                    auto_download: r.get("auto_download"),
+                    download_format: r.get("download_format"),
+                    current_chapter: r.get("current_chapter"),
+                    save_to: r.get("save_to"),
+                    last_checked_at: r.get("last_checked_at"),
+                    last_updated_at: r.get("last_updated_at"),
+                    total_chapters: r.get("total_chapters"),
+                    downloaded_chapters_count: r.get("downloaded_count"),
+                }
+            )?,
+            None => db_fetch_all_map!(
+                self,
+                r#"
+                SELECT
+                    f.manga_id,
+                    m.title,
+                    m.module_id,
+                    m.original_url,
+                    m.cover_url,
+                    f.order_index,
+                    f.enabled,
+                    COALESCE(f.auto_download, FALSE) as auto_download,
+                    COALESCE(f.download_format, 'CBZ') as download_format,
+                    f.current_chapter,
+                    f.save_to,
+                    f.last_checked_at,
+                    f.last_updated_at,
+                    COUNT(c.id) as total_chapters,
+                    COUNT(CASE WHEN c.is_downloaded THEN 1 END) as downloaded_count
+                FROM favorites f
+                JOIN mangas m ON m.id = f.manga_id
+                LEFT JOIN chapters c ON c.manga_id = f.manga_id
+                GROUP BY f.manga_id, m.id
+                ORDER BY f.order_index, f.last_updated_at DESC
+                "#,
+                [],
+                |r| crate::models::Favorite {
+                    manga_id: r.get("manga_id"),
+                    title: r.get("title"),
+                    module_id: r.get("module_id"),
+                    original_url: r.get("original_url"),
+                    cover_url: r.get("cover_url"),
+                    order_index: r.get("order_index"),
+                    enabled: r.get("enabled"),
+                    auto_download: r.get("auto_download"),
+                    download_format: r.get("download_format"),
+                    current_chapter: r.get("current_chapter"),
+                    save_to: r.get("save_to"),
+                    last_checked_at: r.get("last_checked_at"),
+                    last_updated_at: r.get("last_updated_at"),
+                    total_chapters: r.get("total_chapters"),
+                    downloaded_chapters_count: r.get("downloaded_count"),
+                }
+            )?,
         };
-
-        let mut favs = Vec::new();
-        for r in rows {
-            favs.push(crate::models::Favorite {
-                manga_id: r.get("manga_id"),
-                title: r.get("title"),
-                module_id: r.get("module_id"),
-                original_url: r.get("original_url"),
-                cover_url: r.get("cover_url"),
-                order_index: r.get("order_index"),
-                enabled: r.get("enabled"),
-                auto_download: r.get("auto_download"),
-                download_format: r.get("download_format"),
-                current_chapter: r.get("current_chapter"),
-                save_to: r.get("save_to"),
-                last_checked_at: r.get("last_checked_at"),
-                last_updated_at: r.get("last_updated_at"),
-                total_chapters: r.get("total_chapters"),
-                downloaded_chapters_count: r.get("downloaded_count"),
-            });
-        }
 
         Ok(favs)
     }
@@ -1076,62 +1665,56 @@ impl Database {
         auto_download: bool,
         download_format: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE favorites SET enabled = ?1, auto_download = ?2, download_format = ?3 WHERE manga_id = ?4"
-        )
-        .bind(enabled)
-        .bind(auto_download)
-        .bind(download_format)
-        .bind(manga_id)
-        .execute(&self.pool)
-        .await?;
+        db_execute!(
+            self,
+            "UPDATE favorites SET enabled = ?1, auto_download = ?2, download_format = ?3 WHERE manga_id = ?4",
+            enabled,
+            auto_download,
+            download_format,
+            manga_id,
+        )?;
 
         Ok(())
     }
 
     pub async fn list_manga_chapters(&self, manga_id: &str) -> Result<Vec<(String, String, bool)>> {
-        let rows = sqlx::query(
-            "SELECT title, url, is_downloaded FROM chapters WHERE manga_id = ?1 ORDER BY rowid ASC",
-        )
-        .bind(manga_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut list = Vec::new();
-        for r in rows {
-            list.push((r.get("title"), r.get("url"), r.get("is_downloaded")));
-        }
+        let list = db_fetch_all_map!(
+            self,
+            "SELECT title, url, is_downloaded FROM chapters WHERE manga_id = ?1 ORDER BY chapter_number ASC, id ASC",
+            [manga_id],
+            |r| (r.get("title"), r.get("url"), r.get("is_downloaded"))
+        )?;
         Ok(list)
     }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT value FROM settings WHERE key = ?1")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.get("value")))
+        let val = db_fetch_optional_map!(
+            self,
+            "SELECT value FROM settings WHERE key = ?1",
+            [key],
+            |r| r.get::<String, _>("value")
+        )?;
+        Ok(val)
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await?;
+        db_execute!(
+            self,
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            key,
+            value,
+        )?;
         Ok(())
     }
 
     pub async fn get_settings(&self) -> Result<crate::models::AppSettings> {
         let mut s = crate::models::AppSettings::default();
-        let rows = sqlx::query("SELECT key, value FROM settings")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = db_fetch_all_map!(self, "SELECT key, value FROM settings", [], |r| (
+            r.get::<String, _>("key"),
+            r.get::<String, _>("value")
+        ))?;
 
-        for r in rows {
-            let k: String = r.get("key");
-            let v: String = r.get("value");
+        for (k, v) in rows {
             match k.as_str() {
                 "download_dir" => s.download_dir = v,
                 "default_format" => s.default_format = v,
@@ -1180,53 +1763,59 @@ impl Database {
     // ==========================================
 
     pub async fn count_users(&self) -> Result<i64> {
-        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM users")
-            .fetch_one(&self.pool)
-            .await?;
+        let row: (i64,) = db_query_as_fetch_one!(self, (i64,), "SELECT count(*) FROM users")?;
         Ok(row.0)
     }
 
     pub async fn create_initial_admin(&self, username: &str, password: &str) -> Result<User> {
-        let mut tx = self.pool.begin().await?;
-
         let id = uuid::Uuid::new_v4().to_string();
         let pwd_hash = crate::auth::hash_password(password)?;
         let now = Utc::now();
 
-        sqlx::query(
-            r#"
+        let user_sql = r#"
             INSERT INTO users (id, username, password_hash, role, created_at, updated_at, is_active)
-            VALUES (?1, ?2, ?3, 'admin', ?4, ?4, 1)
-            "#,
-        )
-        .bind(&id)
-        .bind(username)
-        .bind(&pwd_hash)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            r#"
+            VALUES (?1, ?2, ?3, 'admin', ?4, ?4, TRUE)
+            "#;
+        let perms_sql = r#"
             INSERT INTO user_permissions (user_id, can_download, can_manage_favorites, can_trigger_catalog_sync, can_force_refresh, can_view_modules)
-            VALUES (?1, 1, 1, 1, 1, 1)
-            "#,
-        )
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
+            VALUES (?1, TRUE, TRUE, TRUE, TRUE, TRUE)
+            "#;
+        let fav_sql = "UPDATE favorites SET user_id = ?1 WHERE user_id IS NULL";
 
-        // Assign any pre-existing unassigned favorites to this initial administrator
-        sqlx::query(
-            r#"
-            UPDATE favorites SET user_id = ?1 WHERE user_id IS NULL
-            "#,
-        )
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
+        match &self.backend {
+            DbBackend::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(user_sql)
+                    .bind(&id)
+                    .bind(username)
+                    .bind(&pwd_hash)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(perms_sql).bind(&id).execute(&mut *tx).await?;
+                sqlx::query(fav_sql).bind(&id).execute(&mut *tx).await?;
+                tx.commit().await?;
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(&to_pg_sql(user_sql))
+                    .bind(&id)
+                    .bind(username)
+                    .bind(&pwd_hash)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(&to_pg_sql(perms_sql))
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(&to_pg_sql(fav_sql))
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+        }
 
         Ok(User {
             id,
@@ -1251,7 +1840,6 @@ impl Database {
         sso_provider: Option<&str>,
         sso_subject: Option<&str>,
     ) -> Result<User> {
-        let mut tx = self.pool.begin().await?;
         let id = uuid::Uuid::new_v4().to_string();
         let pwd_hash = match password {
             Some(p) => Some(crate::auth::hash_password(p)?),
@@ -1259,23 +1847,6 @@ impl Database {
         };
         let now = Utc::now();
         let role_str = role.as_str();
-
-        sqlx::query(
-            r#"
-            INSERT INTO users (id, username, password_hash, role, sso_provider, sso_subject, created_at, updated_at, is_active)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
-            "#,
-        )
-        .bind(&id)
-        .bind(username)
-        .bind(&pwd_hash)
-        .bind(role_str)
-        .bind(sso_provider)
-        .bind(sso_subject)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
         let perms = permissions.unwrap_or_else(|| {
             if role == Role::Admin {
                 UserPermissions::admin_defaults(&id)
@@ -1284,22 +1855,63 @@ impl Database {
             }
         });
 
-        sqlx::query(
-            r#"
+        let user_sql = r#"
+            INSERT INTO users (id, username, password_hash, role, sso_provider, sso_subject, created_at, updated_at, is_active)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, TRUE)
+            "#;
+        let perms_sql = r#"
             INSERT INTO user_permissions (user_id, can_download, can_manage_favorites, can_trigger_catalog_sync, can_force_refresh, can_view_modules)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-        )
-        .bind(&id)
-        .bind(perms.can_download)
-        .bind(perms.can_manage_favorites)
-        .bind(perms.can_trigger_catalog_sync)
-        .bind(perms.can_force_refresh)
-        .bind(perms.can_view_modules)
-        .execute(&mut *tx)
-        .await?;
+            "#;
 
-        tx.commit().await?;
+        match &self.backend {
+            DbBackend::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(user_sql)
+                    .bind(&id)
+                    .bind(username)
+                    .bind(&pwd_hash)
+                    .bind(role_str)
+                    .bind(sso_provider)
+                    .bind(sso_subject)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(perms_sql)
+                    .bind(&id)
+                    .bind(perms.can_download)
+                    .bind(perms.can_manage_favorites)
+                    .bind(perms.can_trigger_catalog_sync)
+                    .bind(perms.can_force_refresh)
+                    .bind(perms.can_view_modules)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+            DbBackend::Postgres { pool, .. } => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(&to_pg_sql(user_sql))
+                    .bind(&id)
+                    .bind(username)
+                    .bind(&pwd_hash)
+                    .bind(role_str)
+                    .bind(sso_provider)
+                    .bind(sso_subject)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(&to_pg_sql(perms_sql))
+                    .bind(&id)
+                    .bind(perms.can_download)
+                    .bind(perms.can_manage_favorites)
+                    .bind(perms.can_trigger_catalog_sync)
+                    .bind(perms.can_force_refresh)
+                    .bind(perms.can_view_modules)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+        }
 
         Ok(User {
             id,
@@ -1316,122 +1928,115 @@ impl Database {
     }
 
     pub async fn get_user_by_id(&self, id: &str) -> Result<Option<User>> {
-        let row = sqlx::query(
-            "SELECT id, username, password_hash, role, sso_provider, sso_subject, created_at, updated_at, last_login_at, is_active FROM users WHERE id = ?1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|r| {
-            let role_str: String = r.get("role");
-            User {
-                id: r.get("id"),
-                username: r.get("username"),
-                password_hash: r.get("password_hash"),
-                role: Role::from_str(&role_str),
-                sso_provider: r.get("sso_provider"),
-                sso_subject: r.get("sso_subject"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                last_login_at: r.get("last_login_at"),
-                is_active: r.get("is_active"),
+        let user = db_fetch_optional_map!(
+            self,
+            "SELECT id, username, password_hash, role, sso_provider, sso_subject, created_at, updated_at, last_login_at, is_active FROM users WHERE id = ?1",
+            [id],
+            |r| {
+                let role_str: String = r.get("role");
+                User {
+                    id: r.get("id"),
+                    username: r.get("username"),
+                    password_hash: r.get("password_hash"),
+                    role: Role::from_str(&role_str),
+                    sso_provider: r.get("sso_provider"),
+                    sso_subject: r.get("sso_subject"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    last_login_at: r.get("last_login_at"),
+                    is_active: r.get("is_active"),
+                }
             }
-        }))
+        )?;
+        Ok(user)
     }
 
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let row = sqlx::query(
-            "SELECT id, username, password_hash, role, sso_provider, sso_subject, created_at, updated_at, last_login_at, is_active FROM users WHERE username = ?1"
-        )
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|r| {
-            let role_str: String = r.get("role");
-            User {
-                id: r.get("id"),
-                username: r.get("username"),
-                password_hash: r.get("password_hash"),
-                role: Role::from_str(&role_str),
-                sso_provider: r.get("sso_provider"),
-                sso_subject: r.get("sso_subject"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                last_login_at: r.get("last_login_at"),
-                is_active: r.get("is_active"),
+        let user = db_fetch_optional_map!(
+            self,
+            "SELECT id, username, password_hash, role, sso_provider, sso_subject, created_at, updated_at, last_login_at, is_active FROM users WHERE username = ?1",
+            [username],
+            |r| {
+                let role_str: String = r.get("role");
+                User {
+                    id: r.get("id"),
+                    username: r.get("username"),
+                    password_hash: r.get("password_hash"),
+                    role: Role::from_str(&role_str),
+                    sso_provider: r.get("sso_provider"),
+                    sso_subject: r.get("sso_subject"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    last_login_at: r.get("last_login_at"),
+                    is_active: r.get("is_active"),
+                }
             }
-        }))
+        )?;
+        Ok(user)
     }
 
     pub async fn list_users_with_permissions(&self) -> Result<Vec<(User, UserPermissions)>> {
-        let rows = sqlx::query(
+        let list = db_fetch_all_map!(
+            self,
             r#"
-            SELECT 
-                u.id, u.username, u.password_hash, u.role, u.sso_provider, u.sso_subject, 
+            SELECT
+                u.id, u.username, u.password_hash, u.role, u.sso_provider, u.sso_subject,
                 u.created_at, u.updated_at, u.last_login_at, u.is_active,
                 p.can_download, p.can_manage_favorites, p.can_trigger_catalog_sync, p.can_force_refresh, p.can_view_modules
             FROM users u
             LEFT JOIN user_permissions p ON p.user_id = u.id
             ORDER BY u.created_at ASC
             "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut list = Vec::new();
-        for r in rows {
-            let role_str: String = r.get("role");
-            let role = Role::from_str(&role_str);
-            let user = User {
-                id: r.get("id"),
-                username: r.get("username"),
-                password_hash: r.get("password_hash"),
-                role,
-                sso_provider: r.get("sso_provider"),
-                sso_subject: r.get("sso_subject"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                last_login_at: r.get("last_login_at"),
-                is_active: r.get("is_active"),
-            };
-            let perms = UserPermissions {
-                user_id: user.id.clone(),
-                can_download: r.try_get("can_download").unwrap_or(true),
-                can_manage_favorites: r.try_get("can_manage_favorites").unwrap_or(true),
-                can_trigger_catalog_sync: r.try_get("can_trigger_catalog_sync").unwrap_or(true),
-                can_force_refresh: r.try_get("can_force_refresh").unwrap_or(true),
-                can_view_modules: r.try_get("can_view_modules").unwrap_or(true),
-            };
-            list.push((user, perms));
-        }
+            [],
+            |r| {
+                let role_str: String = r.get("role");
+                let role = Role::from_str(&role_str);
+                let user = User {
+                    id: r.get("id"),
+                    username: r.get("username"),
+                    password_hash: r.get("password_hash"),
+                    role,
+                    sso_provider: r.get("sso_provider"),
+                    sso_subject: r.get("sso_subject"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    last_login_at: r.get("last_login_at"),
+                    is_active: r.get("is_active"),
+                };
+                let perms = UserPermissions {
+                    user_id: user.id.clone(),
+                    can_download: r.try_get("can_download").unwrap_or(true),
+                    can_manage_favorites: r.try_get("can_manage_favorites").unwrap_or(true),
+                    can_trigger_catalog_sync: r.try_get("can_trigger_catalog_sync").unwrap_or(true),
+                    can_force_refresh: r.try_get("can_force_refresh").unwrap_or(true),
+                    can_view_modules: r.try_get("can_view_modules").unwrap_or(true),
+                };
+                (user, perms)
+            }
+        )?;
 
         Ok(list)
     }
 
     pub async fn get_user_permissions(&self, user_id: &str) -> Result<UserPermissions> {
-        let row = sqlx::query(
-            "SELECT can_download, can_manage_favorites, can_trigger_catalog_sync, can_force_refresh, can_view_modules FROM user_permissions WHERE user_id = ?1"
-        )
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        match row {
-            Some(r) => Ok(UserPermissions {
+        let perms = db_fetch_optional_map!(
+            self,
+            "SELECT can_download, can_manage_favorites, can_trigger_catalog_sync, can_force_refresh, can_view_modules FROM user_permissions WHERE user_id = ?1",
+            [user_id],
+            |r| UserPermissions {
                 user_id: user_id.to_string(),
                 can_download: r.get("can_download"),
                 can_manage_favorites: r.get("can_manage_favorites"),
                 can_trigger_catalog_sync: r.get("can_trigger_catalog_sync"),
                 can_force_refresh: r.get("can_force_refresh"),
                 can_view_modules: r.get("can_view_modules"),
-            }),
-            None => Ok(UserPermissions {
-                user_id: user_id.to_string(),
-                ..Default::default()
-            }),
-        }
+            }
+        )?;
+
+        Ok(perms.unwrap_or_else(|| UserPermissions {
+            user_id: user_id.to_string(),
+            ..Default::default()
+        }))
     }
 
     pub async fn update_user(
@@ -1446,37 +2051,33 @@ impl Database {
             None => None,
         };
 
-        let mut tx = self.pool.begin().await?;
-
         if let Some(r) = role {
-            sqlx::query("UPDATE users SET role = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2")
-                .bind(r.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            db_execute!(
+                self,
+                "UPDATE users SET role = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+                r.as_str(),
+                id,
+            )?;
         }
 
         if let Some(active) = is_active {
-            sqlx::query(
+            db_execute!(
+                self,
                 "UPDATE users SET is_active = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
-            )
-            .bind(active)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+                active,
+                id,
+            )?;
         }
 
         if let Some(hash) = pwd_hash {
-            sqlx::query(
+            db_execute!(
+                self,
                 "UPDATE users SET password_hash = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
-            )
-            .bind(hash)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+                hash,
+                id,
+            )?;
         }
 
-        tx.commit().await?;
         Ok(())
     }
 
@@ -1485,7 +2086,8 @@ impl Database {
         user_id: &str,
         permissions: &UserPermissions,
     ) -> Result<()> {
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO user_permissions (user_id, can_download, can_manage_favorites, can_trigger_catalog_sync, can_force_refresh, can_view_modules)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1496,32 +2098,28 @@ impl Database {
                 can_force_refresh = excluded.can_force_refresh,
                 can_view_modules = excluded.can_view_modules
             "#,
-        )
-        .bind(user_id)
-        .bind(permissions.can_download)
-        .bind(permissions.can_manage_favorites)
-        .bind(permissions.can_trigger_catalog_sync)
-        .bind(permissions.can_force_refresh)
-        .bind(permissions.can_view_modules)
-        .execute(&self.pool)
-        .await?;
+            user_id,
+            permissions.can_download,
+            permissions.can_manage_favorites,
+            permissions.can_trigger_catalog_sync,
+            permissions.can_force_refresh,
+            permissions.can_view_modules,
+        )?;
 
         Ok(())
     }
 
     pub async fn update_user_last_login(&self, user_id: &str) -> Result<()> {
-        sqlx::query("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?1")
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
+        db_execute!(
+            self,
+            "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            user_id,
+        )?;
         Ok(())
     }
 
     pub async fn delete_user(&self, user_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM users WHERE id = ?1")
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
+        db_execute!(self, "DELETE FROM users WHERE id = ?1", user_id)?;
         Ok(())
     }
 
@@ -1542,21 +2140,20 @@ impl Database {
         let now = Utc::now();
         let expires_at = now + chrono::Duration::days(ttl_days);
 
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO user_sessions (id, token_hash, user_id, created_at, expires_at, last_active_at, user_agent, ip_address)
             VALUES (?1, ?2, ?3, ?4, ?5, ?4, ?6, ?7)
             "#,
-        )
-        .bind(id)
-        .bind(token_hash)
-        .bind(user_id)
-        .bind(now)
-        .bind(expires_at)
-        .bind(user_agent)
-        .bind(ip_address)
-        .execute(&self.pool)
-        .await?;
+            id,
+            token_hash,
+            user_id,
+            now,
+            expires_at,
+            user_agent,
+            ip_address,
+        )?;
 
         Ok(raw_token)
     }
@@ -1566,28 +2163,24 @@ impl Database {
         let now = Utc::now();
 
         // 1. Try finding in user_sessions
-        let session_row = sqlx::query(
+        let session_opt = db_fetch_optional_map!(
+            self,
             r#"
-            SELECT 
-                s.id as session_id, s.user_id, s.expires_at, 
-                u.id, u.username, u.password_hash, u.role, u.sso_provider, u.sso_subject, 
+            SELECT
+                s.id as session_id, s.user_id, s.expires_at,
+                u.id, u.username, u.password_hash, u.role, u.sso_provider, u.sso_subject,
                 u.created_at, u.updated_at, u.last_login_at, u.is_active
             FROM user_sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ?1
             "#,
-        )
-        .bind(&token_hash)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(r) = session_row {
-            let expires_at: chrono::DateTime<Utc> = r.get("expires_at");
-            let is_active: bool = r.get("is_active");
-            if is_active && expires_at > now {
+            [&token_hash],
+            |r| {
+                let role_str: String = r.get("role");
                 let session_id: String = r.get("session_id");
                 let user_id: String = r.get("user_id");
-                let role_str: String = r.get("role");
+                let expires_at: chrono::DateTime<Utc> = r.get("expires_at");
+                let is_active: bool = r.get("is_active");
                 let user = User {
                     id: user_id.clone(),
                     username: r.get("username"),
@@ -1600,12 +2193,17 @@ impl Database {
                     last_login_at: r.get("last_login_at"),
                     is_active: true,
                 };
-                let _ = sqlx::query(
+                (session_id, user_id, expires_at, is_active, user)
+            }
+        )?;
+
+        if let Some((session_id, user_id, expires_at, is_active, user)) = session_opt {
+            if is_active && expires_at > now {
+                let _ = db_execute!(
+                    self,
                     "UPDATE user_sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?1",
-                )
-                .bind(session_id)
-                .execute(&self.pool)
-                .await;
+                    session_id,
+                );
 
                 let permissions = self.get_user_permissions(&user_id).await?;
                 return Ok(Some(AuthContext {
@@ -1617,34 +2215,24 @@ impl Database {
         }
 
         // 2. Try finding in api_tokens
-        let token_row = sqlx::query(
+        let token_opt = db_fetch_optional_map!(
+            self,
             r#"
-            SELECT 
+            SELECT
                 t.id as token_id, t.user_id, t.name, t.expires_at,
-                u.id, u.username, u.password_hash, u.role, u.sso_provider, u.sso_subject, 
+                u.id, u.username, u.password_hash, u.role, u.sso_provider, u.sso_subject,
                 u.created_at, u.updated_at, u.last_login_at, u.is_active
             FROM api_tokens t
             JOIN users u ON u.id = t.user_id
             WHERE t.token_hash = ?1
             "#,
-        )
-        .bind(&token_hash)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some(r) = token_row {
-            let expires_at: Option<chrono::DateTime<Utc>> = r.get("expires_at");
-            let is_active: bool = r.get("is_active");
-            let is_valid = is_active
-                && match expires_at {
-                    Some(exp) => exp > now,
-                    None => true,
-                };
-
-            if is_valid {
+            [&token_hash],
+            |r| {
+                let role_str: String = r.get("role");
                 let token_id: String = r.get("token_id");
                 let user_id: String = r.get("user_id");
-                let role_str: String = r.get("role");
+                let expires_at: Option<chrono::DateTime<Utc>> = r.get("expires_at");
+                let is_active: bool = r.get("is_active");
                 let user = User {
                     id: user_id.clone(),
                     username: r.get("username"),
@@ -1657,12 +2245,23 @@ impl Database {
                     last_login_at: r.get("last_login_at"),
                     is_active: true,
                 };
-                let _ = sqlx::query(
+                (token_id, user_id, expires_at, is_active, user)
+            }
+        )?;
+
+        if let Some((token_id, user_id, expires_at, is_active, user)) = token_opt {
+            let is_valid = is_active
+                && match expires_at {
+                    Some(exp) => exp > now,
+                    None => true,
+                };
+
+            if is_valid {
+                let _ = db_execute!(
+                    self,
                     "UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?1",
-                )
-                .bind(token_id)
-                .execute(&self.pool)
-                .await;
+                    token_id,
+                );
 
                 let permissions = self.get_user_permissions(&user_id).await?;
                 return Ok(Some(AuthContext {
@@ -1678,10 +2277,11 @@ impl Database {
 
     pub async fn delete_session(&self, raw_token: &str) -> Result<()> {
         let token_hash = hash_token(raw_token);
-        sqlx::query("DELETE FROM user_sessions WHERE token_hash = ?1")
-            .bind(token_hash)
-            .execute(&self.pool)
-            .await?;
+        db_execute!(
+            self,
+            "DELETE FROM user_sessions WHERE token_hash = ?1",
+            token_hash,
+        )?;
         Ok(())
     }
 
@@ -1697,20 +2297,19 @@ impl Database {
         let now = Utc::now();
         let expires_at = expires_in_days.map(|d| now + chrono::Duration::days(d));
 
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO api_tokens (id, token_hash, user_id, name, created_at, expires_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
-        )
-        .bind(&id)
-        .bind(&token_hash)
-        .bind(user_id)
-        .bind(name)
-        .bind(now)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await?;
+            &id,
+            &token_hash,
+            user_id,
+            name,
+            now,
+            expires_at,
+        )?;
 
         Ok((
             raw_token,
@@ -1730,16 +2329,11 @@ impl Database {
         &self,
         user_id: &str,
     ) -> Result<Vec<crate::auth::ApiToken>> {
-        let rows = sqlx::query(
-            "SELECT id, token_hash, user_id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ?1 ORDER BY created_at DESC"
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut list = Vec::new();
-        for r in rows {
-            list.push(crate::auth::ApiToken {
+        let list = db_fetch_all_map!(
+            self,
+            "SELECT id, token_hash, user_id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ?1 ORDER BY created_at DESC",
+            [user_id],
+            |r| crate::auth::ApiToken {
                 id: r.get("id"),
                 token_hash: r.get("token_hash"),
                 user_id: r.get("user_id"),
@@ -1747,17 +2341,18 @@ impl Database {
                 created_at: r.get("created_at"),
                 expires_at: r.get("expires_at"),
                 last_used_at: r.get("last_used_at"),
-            });
-        }
+            }
+        )?;
         Ok(list)
     }
 
     pub async fn delete_api_token(&self, user_id: &str, token_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM api_tokens WHERE id = ?1 AND user_id = ?2")
-            .bind(token_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
+        db_execute!(
+            self,
+            "DELETE FROM api_tokens WHERE id = ?1 AND user_id = ?2",
+            token_id,
+            user_id,
+        )?;
         Ok(())
     }
 
@@ -1766,31 +2361,31 @@ impl Database {
     // ==========================================
 
     pub async fn get_manga_cache(&self, manga_id: &str) -> Result<Option<MangaCacheItem>> {
-        let row = sqlx::query(
+        let item = db_fetch_optional_map!(
+            self,
             r#"
             SELECT manga_id, module_id, title, cover_url, metadata_json, chapters_json, cached_at, expires_at
             FROM manga_cache
             WHERE manga_id = ?1
             "#,
-        )
-        .bind(manga_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|r| MangaCacheItem {
-            manga_id: r.get("manga_id"),
-            module_id: r.get("module_id"),
-            title: r.get("title"),
-            cover_url: r.get("cover_url"),
-            metadata_json: r.get("metadata_json"),
-            chapters_json: r.get("chapters_json"),
-            cached_at: r.get("cached_at"),
-            expires_at: r.get("expires_at"),
-        }))
+            [manga_id],
+            |r| MangaCacheItem {
+                manga_id: r.get("manga_id"),
+                module_id: r.get("module_id"),
+                title: r.get("title"),
+                cover_url: r.get("cover_url"),
+                metadata_json: r.get("metadata_json"),
+                chapters_json: r.get("chapters_json"),
+                cached_at: r.get("cached_at"),
+                expires_at: r.get("expires_at"),
+            }
+        )?;
+        Ok(item)
     }
 
     pub async fn save_manga_cache(&self, item: &MangaCacheItem) -> Result<()> {
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO manga_cache (manga_id, module_id, title, cover_url, metadata_json, chapters_json, cached_at, expires_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -1802,64 +2397,68 @@ impl Database {
                 cached_at = excluded.cached_at,
                 expires_at = excluded.expires_at
             "#,
-        )
-        .bind(&item.manga_id)
-        .bind(&item.module_id)
-        .bind(&item.title)
-        .bind(&item.cover_url)
-        .bind(&item.metadata_json)
-        .bind(&item.chapters_json)
-        .bind(item.cached_at)
-        .bind(item.expires_at)
-        .execute(&self.pool)
-        .await?;
+            &item.manga_id,
+            &item.module_id,
+            &item.title,
+            &item.cover_url,
+            &item.metadata_json,
+            &item.chapters_json,
+            item.cached_at,
+            item.expires_at,
+        )?;
 
         Ok(())
     }
 
     pub async fn delete_manga_cache(&self, manga_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM manga_cache WHERE manga_id = ?1")
-            .bind(manga_id)
-            .execute(&self.pool)
-            .await?;
+        db_execute!(
+            self,
+            "DELETE FROM manga_cache WHERE manga_id = ?1",
+            manga_id,
+        )?;
         Ok(())
     }
 
     pub async fn get_module_cache_policy(&self, module_id: &str) -> Result<ModuleCachePolicy> {
-        let row = sqlx::query(
-            "SELECT module_id, ttl_value, ttl_unit, min_delay_ms, updated_at FROM module_cache_policies WHERE module_id = ?1"
-        )
-        .bind(module_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = db_fetch_optional_map!(
+            self,
+            "SELECT module_id, ttl_value, ttl_unit, min_delay_ms, updated_at FROM module_cache_policies WHERE module_id = ?1",
+            [module_id],
+            |r| {
+                let unit_str: String = r.get("ttl_unit");
+                ModuleCachePolicy {
+                    module_id: r.get("module_id"),
+                    ttl_value: r.get::<i64, _>("ttl_value") as u32,
+                    ttl_unit: TtlUnit::from_str_loose(&unit_str),
+                    min_delay_ms: r.get::<i64, _>("min_delay_ms") as u64,
+                    updated_at: r.get("updated_at"),
+                }
+            }
+        )?;
 
-        if let Some(r) = row {
-            let unit_str: String = r.get("ttl_unit");
-            return Ok(ModuleCachePolicy {
-                module_id: r.get("module_id"),
-                ttl_value: r.get::<i64, _>("ttl_value") as u32,
-                ttl_unit: TtlUnit::from_str_loose(&unit_str),
-                min_delay_ms: r.get::<i64, _>("min_delay_ms") as u64,
-                updated_at: r.get("updated_at"),
-            });
+        if let Some(policy) = row {
+            return Ok(policy);
         }
 
         // Fallback to global policy "*"
-        let fallback_row = sqlx::query(
-            "SELECT module_id, ttl_value, ttl_unit, min_delay_ms, updated_at FROM module_cache_policies WHERE module_id = '*'"
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        let fallback_row = db_fetch_optional_map!(
+            self,
+            "SELECT module_id, ttl_value, ttl_unit, min_delay_ms, updated_at FROM module_cache_policies WHERE module_id = '*'",
+            [],
+            |r| {
+                let unit_str: String = r.get("ttl_unit");
+                ModuleCachePolicy {
+                    module_id: module_id.to_string(),
+                    ttl_value: r.get::<i64, _>("ttl_value") as u32,
+                    ttl_unit: TtlUnit::from_str_loose(&unit_str),
+                    min_delay_ms: r.get::<i64, _>("min_delay_ms") as u64,
+                    updated_at: r.get("updated_at"),
+                }
+            }
+        )?;
 
-        if let Some(r) = fallback_row {
-            let unit_str: String = r.get("ttl_unit");
-            return Ok(ModuleCachePolicy {
-                module_id: module_id.to_string(),
-                ttl_value: r.get::<i64, _>("ttl_value") as u32,
-                ttl_unit: TtlUnit::from_str_loose(&unit_str),
-                min_delay_ms: r.get::<i64, _>("min_delay_ms") as u64,
-                updated_at: r.get("updated_at"),
-            });
+        if let Some(policy) = fallback_row {
+            return Ok(policy);
         }
 
         Ok(ModuleCachePolicy {
@@ -1869,28 +2468,27 @@ impl Database {
     }
 
     pub async fn list_module_cache_policies(&self) -> Result<Vec<ModuleCachePolicy>> {
-        let rows = sqlx::query(
-            "SELECT module_id, ttl_value, ttl_unit, min_delay_ms, updated_at FROM module_cache_policies ORDER BY module_id ASC"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut list = Vec::new();
-        for r in rows {
-            let unit_str: String = r.get("ttl_unit");
-            list.push(ModuleCachePolicy {
-                module_id: r.get("module_id"),
-                ttl_value: r.get::<i64, _>("ttl_value") as u32,
-                ttl_unit: TtlUnit::from_str_loose(&unit_str),
-                min_delay_ms: r.get::<i64, _>("min_delay_ms") as u64,
-                updated_at: r.get("updated_at"),
-            });
-        }
+        let list = db_fetch_all_map!(
+            self,
+            "SELECT module_id, ttl_value, ttl_unit, min_delay_ms, updated_at FROM module_cache_policies ORDER BY module_id ASC",
+            [],
+            |r| {
+                let unit_str: String = r.get("ttl_unit");
+                ModuleCachePolicy {
+                    module_id: r.get("module_id"),
+                    ttl_value: r.get::<i64, _>("ttl_value") as u32,
+                    ttl_unit: TtlUnit::from_str_loose(&unit_str),
+                    min_delay_ms: r.get::<i64, _>("min_delay_ms") as u64,
+                    updated_at: r.get("updated_at"),
+                }
+            }
+        )?;
         Ok(list)
     }
 
     pub async fn set_module_cache_policy(&self, policy: &ModuleCachePolicy) -> Result<()> {
-        sqlx::query(
+        db_execute!(
+            self,
             r#"
             INSERT INTO module_cache_policies (module_id, ttl_value, ttl_unit, min_delay_ms, updated_at)
             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
@@ -1900,15 +2498,427 @@ impl Database {
                 min_delay_ms = excluded.min_delay_ms,
                 updated_at = CURRENT_TIMESTAMP
             "#,
-        )
-        .bind(&policy.module_id)
-        .bind(policy.ttl_value as i64)
-        .bind(policy.ttl_unit.as_str())
-        .bind(policy.min_delay_ms as i64)
-        .execute(&self.pool)
-        .await?;
+            &policy.module_id,
+            policy.ttl_value as i64,
+            policy.ttl_unit.as_str(),
+            policy.min_delay_ms as i64,
+        )?;
 
         Ok(())
+    }
+
+    // ==========================================
+    // DOWNLOADS, FAVORITES & STATS HELPERS
+    // ==========================================
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn queue_download(
+        &self,
+        id: &str,
+        manga_title: &str,
+        chapter_title: &str,
+        chapter_url: &str,
+        module_id: &str,
+        format: &str,
+        max_retries: i64,
+    ) -> Result<()> {
+        db_execute!(
+            self,
+            r#"
+            INSERT INTO downloads (id, manga_title, chapter_title, chapter_url, module_id, format, status, retry_count, max_retries)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Pending', 0, ?7)
+            "#,
+            id,
+            manga_title,
+            chapter_title,
+            chapter_url,
+            module_id,
+            format,
+            max_retries,
+        )?;
+        Ok(())
+    }
+
+    pub async fn fetch_next_pending_download(
+        &self,
+    ) -> Result<Option<(String, String, String, String, String, String, i64, i64)>> {
+        let row = db_query_as_fetch_optional!(
+            self,
+            (String, String, String, String, String, String, i64, i64),
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE status = 'Pending' ORDER BY created_at ASC LIMIT 1"
+        )?;
+        Ok(row)
+    }
+
+    pub async fn set_download_status(&self, id: &str, status: &str) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = ?1 WHERE id = ?2",
+            status,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn set_download_total_pages(&self, id: &str, total_pages: i64) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET total_pages = ?1 WHERE id = ?2",
+            total_pages,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn set_download_progress(&self, id: &str, downloaded_pages: i64) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET downloaded_pages = ?1 WHERE id = ?2",
+            downloaded_pages,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn mark_download_completed(&self, id: &str, total_pages: i64) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = 'Completed', downloaded_pages = ?1 WHERE id = ?2",
+            total_pages,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn mark_download_failed(&self, id: &str, error_message: &str) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = 'Failed', error_message = ?1 WHERE id = ?2",
+            error_message,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn schedule_download_retry(
+        &self,
+        id: &str,
+        next_retry: i64,
+        retry_note: &str,
+    ) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = 'Pending', retry_count = ?1, error_message = ?2, created_at = CURRENT_TIMESTAMP WHERE id = ?3",
+            next_retry,
+            retry_note,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn get_manga_metadata_by_title(
+        &self,
+        title: &str,
+        module_id: &str,
+    ) -> Result<
+        Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
+        let row = db_query_as_fetch_optional!(
+            self,
+            (Option<String>, Option<String>, Option<String>, Option<String>),
+            "SELECT author, description, genres, original_url FROM mangas WHERE title = ?1 AND module_id = ?2 LIMIT 1",
+            title,
+            module_id,
+        )?;
+        Ok(row)
+    }
+
+    pub async fn list_downloads_summary(
+        &self,
+        limit: i64,
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            Option<String>,
+            i64,
+            i64,
+        )>,
+    > {
+        let rows = db_query_as_fetch_all!(
+            self,
+            (String, String, String, String, String, String, i64, i64, String, Option<String>, i64, i64),
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, total_pages, downloaded_pages, status, error_message, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads ORDER BY created_at DESC LIMIT ?1",
+            limit,
+        )?;
+        Ok(rows)
+    }
+
+    pub async fn delete_download(&self, id: &str) -> Result<()> {
+        db_execute!(self, "DELETE FROM downloads WHERE id = ?1", id)?;
+        Ok(())
+    }
+
+    pub async fn get_download_retry_info(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, String, String, String, String, String, i64, i64)>> {
+        let row = db_query_as_fetch_optional!(
+            self,
+            (String, String, String, String, String, String, i64, i64),
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE id = ?1",
+            id,
+        )?;
+        Ok(row)
+    }
+
+    pub async fn reset_download_for_retry(&self, id: &str) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = 'Pending', error_message = NULL, downloaded_pages = 0, retry_count = 0, created_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn list_failed_downloads(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String, String, i64, i64)>> {
+        let rows = db_query_as_fetch_all!(
+            self,
+            (String, String, String, String, String, String, i64, i64),
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, 0, COALESCE(max_retries, 3) FROM downloads WHERE status = 'Failed'",
+        )?;
+        Ok(rows)
+    }
+
+    pub async fn reset_all_failed_downloads(&self) -> Result<u64> {
+        let affected = db_execute!(
+            self,
+            "UPDATE downloads SET status = 'Pending', error_message = NULL, downloaded_pages = 0, retry_count = 0, created_at = CURRENT_TIMESTAMP WHERE status = 'Failed'",
+        )?;
+        Ok(affected)
+    }
+
+    pub async fn get_download_chapter_url(&self, id: &str) -> Result<Option<String>> {
+        let url = db_query_scalar_fetch_optional!(
+            self,
+            String,
+            "SELECT chapter_url FROM downloads WHERE id = ?1",
+            id,
+        )?;
+        Ok(url)
+    }
+
+    pub async fn list_incomplete_downloads(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String)>> {
+        let rows = db_query_as_fetch_all!(
+            self,
+            (String, String, String, String, String),
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id FROM downloads WHERE status != 'Completed' ORDER BY created_at DESC",
+        )?;
+        Ok(rows)
+    }
+
+    pub async fn delete_favorite(&self, manga_id: &str) -> Result<()> {
+        db_execute!(self, "DELETE FROM favorites WHERE manga_id = ?1", manga_id,)?;
+        Ok(())
+    }
+
+    pub async fn count_mangas(&self) -> Result<i64> {
+        let row: (i64,) = db_query_as_fetch_one!(self, (i64,), "SELECT COUNT(*) FROM mangas")?;
+        Ok(row.0)
+    }
+
+    pub async fn count_chapters(&self) -> Result<i64> {
+        let row: (i64,) = db_query_as_fetch_one!(self, (i64,), "SELECT COUNT(*) FROM chapters")?;
+        Ok(row.0)
+    }
+
+    pub async fn get_first_manga_meta(
+        &self,
+    ) -> Result<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> {
+        let row = db_query_as_fetch_one!(
+            self,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>
+            ),
+            "SELECT cover_url, author, description, genres FROM mangas LIMIT 1"
+        )?;
+        Ok(row)
+    }
+
+    pub async fn list_mangas_summary(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, String, String, String)>> {
+        let rows = db_query_as_fetch_all!(
+            self,
+            (String, String, String, String, String),
+            "SELECT id, module_id, title, original_url, status FROM mangas LIMIT ?1",
+            limit,
+        )?;
+        Ok(rows)
+    }
+
+    pub async fn get_manga_metadata_for_packaging(
+        &self,
+        manga_title: &str,
+        module_id: &str,
+    ) -> Result<
+        Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
+        let prefix_id = format!("{}:%", module_id);
+        let like_op = if self.is_postgres() { "ILIKE" } else { "LIKE" };
+        let sql = format!(
+            "SELECT author, genres, description, original_url FROM mangas WHERE title = ?1 OR id {like_op} ?2 ORDER BY (author IS NOT NULL AND author != '') DESC, updated_at DESC LIMIT 1"
+        );
+        let row = db_query_as_fetch_optional!(
+            self,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>
+            ),
+            &sql,
+            manga_title,
+            &prefix_id,
+        )?;
+        Ok(row)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub async fn list_downloads_with_created_at(
+        &self,
+        limit: i64,
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            Option<String>,
+            i64,
+            i64,
+            String,
+        )>,
+    > {
+        let rows = db_fetch_all_map!(
+            self,
+            r#"
+            SELECT id, manga_title, chapter_title, chapter_url, module_id, format,
+                   total_pages, downloaded_pages, status, error_message,
+                   COALESCE(retry_count, 0) as retry_count, COALESCE(max_retries, 3) as max_retries, created_at
+            FROM downloads
+            ORDER BY created_at DESC
+            LIMIT ?1
+            "#,
+            [limit],
+            |r| {
+                let created_at: chrono::DateTime<Utc> = r.get("created_at");
+                (
+                    r.get("id"),
+                    r.get("manga_title"),
+                    r.get("chapter_title"),
+                    r.get("chapter_url"),
+                    r.get("module_id"),
+                    r.get("format"),
+                    r.get("total_pages"),
+                    r.get("downloaded_pages"),
+                    r.get("status"),
+                    r.get("error_message"),
+                    r.get("retry_count"),
+                    r.get("max_retries"),
+                    created_at.to_rfc3339(),
+                )
+            }
+        )?;
+        Ok(rows)
+    }
+
+    pub async fn list_pending_downloads(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String, String, i64, i64)>> {
+        let rows = db_query_as_fetch_all!(
+            self,
+            (String, String, String, String, String, String, i64, i64),
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, COALESCE(retry_count, 0), COALESCE(max_retries, 3) FROM downloads WHERE status = 'Pending'",
+        )?;
+        Ok(rows)
+    }
+
+    pub async fn update_download_progress_full(
+        &self,
+        id: &str,
+        status: &str,
+        downloaded_pages: i64,
+        total_pages: Option<i64>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = ?1, downloaded_pages = ?2, total_pages = COALESCE(?3, total_pages), error_message = ?4 WHERE id = ?5",
+            status,
+            downloaded_pages,
+            total_pages,
+            error_message,
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn mark_download_completed_full(&self, id: &str) -> Result<()> {
+        db_execute!(
+            self,
+            "UPDATE downloads SET status = 'Completed', downloaded_pages = total_pages, error_message = NULL WHERE id = ?1",
+            id,
+        )?;
+        Ok(())
+    }
+
+    pub async fn get_download_status_and_retry(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, i64, Option<String>)>> {
+        let row = db_query_as_fetch_optional!(
+            self,
+            (String, i64, Option<String>),
+            "SELECT status, retry_count, error_message FROM downloads WHERE id = ?1",
+            id,
+        )?;
+        Ok(row)
     }
 }
 
@@ -1920,11 +2930,7 @@ mod tests {
     async fn test_database_init() {
         let db = Database::new(":memory:").await.unwrap();
         // Check that tables exist
-        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM mangas")
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-        assert_eq!(row.0, 0);
+        assert_eq!(db.count_mangas().await.unwrap(), 0);
 
         // Test catalog upsert and search
         let items = vec![
@@ -2158,5 +3164,81 @@ mod tests {
             .expect("cache should exist");
         assert_eq!(cached.title, "Chainsaw Man");
         assert!(!cached.is_expired());
+    }
+
+    #[test]
+    fn test_to_pg_sql_and_url_detection() {
+        assert_eq!(
+            to_pg_sql("SELECT * FROM users WHERE id = ?1 AND name = '?2' AND role = ?2"),
+            "SELECT * FROM users WHERE id = $1 AND name = '?2' AND role = $2"
+        );
+        assert!(Database::is_postgres_url(
+            "postgres://user:pass@localhost/fmd"
+        ));
+        assert!(Database::is_postgres_url("POSTGRESQL://localhost:5432/fmd"));
+        assert!(!Database::is_postgres_url("sqlite://data/fmd.db"));
+        assert_eq!(
+            Database::resolve_url(Some("postgres://pg/fmd"), "data/fmd.db"),
+            "postgres://pg/fmd"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_postgres_backend_if_configured() {
+        let Ok(url) = std::env::var("FMD_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let db = Database::connect(&url).await.unwrap();
+        assert!(db.is_postgres());
+
+        let items = vec![("Solo Leveling".to_string(), "novel/Solo.html".to_string())];
+        db.upsert_catalog_items("pg-test-mod", &items)
+            .await
+            .unwrap();
+        let (found, total) = db
+            .search_catalog("Solo", Some("pg-test-mod"), 10, 0)
+            .await
+            .unwrap();
+        assert!(total >= 1);
+        assert!(found.iter().any(|i| i.title == "Solo Leveling"));
+
+        // Favorites, downloads & cleanup
+        db.add_or_update_favorite(
+            "pg-test-mod:solo",
+            "pg-test-mod",
+            "Solo Leveling",
+            "https://example.com/solo",
+            None,
+            true,
+            "CBZ",
+        )
+        .await
+        .unwrap();
+        let favs = db.list_favorites_with_stats().await.unwrap();
+        assert!(favs.iter().any(|f| f.manga_id == "pg-test-mod:solo"));
+
+        let dl_id = format!("pg-dl-{}", uuid::Uuid::new_v4());
+        db.queue_download(
+            &dl_id,
+            "Solo Leveling",
+            "Ch. 1",
+            "https://example.com/solo/1",
+            "pg-test-mod",
+            "CBZ",
+            3,
+        )
+        .await
+        .unwrap();
+        let dls = db.list_downloads_with_created_at(10).await.unwrap();
+        assert!(dls.iter().any(|d| d.0 == dl_id));
+        db.delete_download(&dl_id).await.unwrap();
+        db.delete_favorite("pg-test-mod:solo").await.unwrap();
+
+        // Demo slot schema isolation + cleanup
+        let slot_db = Database::new_demo_slot(Some(&url)).await.unwrap();
+        assert!(slot_db.is_postgres());
+        assert_eq!(slot_db.count_mangas().await.unwrap(), 0);
+        slot_db.close().await;
+        assert!(slot_db.is_closed());
     }
 }

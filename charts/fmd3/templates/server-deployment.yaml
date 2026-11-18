@@ -36,6 +36,10 @@ spec:
               value: {{ .Values.server.env.FMD_DEMO_MODE | quote }}
             - name: DEMO_SLOTS
               value: {{ .Values.server.env.DEMO_SLOTS | quote }}
+            {{- if and (not (kindIs "invalid" .Values.server.env.FMD_DATABASE_URL)) (ne (printf "%v" .Values.server.env.FMD_DATABASE_URL) "") }}
+            - name: FMD_DATABASE_URL
+              value: {{ .Values.server.env.FMD_DATABASE_URL | quote }}
+            {{- end }}
             {{- if and (not (kindIs "invalid" .Values.server.env.FMD_MIN_DELAY_MS)) (ne (printf "%v" .Values.server.env.FMD_MIN_DELAY_MS) "") }}
             - name: FMD_MIN_DELAY_MS
               value: {{ .Values.server.env.FMD_MIN_DELAY_MS | quote }}

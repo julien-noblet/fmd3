@@ -81,7 +81,12 @@ impl Manager {
 async fn create_slot(mut state: AppState, base_path: String) -> anyhow::Result<Slot> {
     let password = generate_secure_token();
     let username = format!("demo-{}", uuid::Uuid::new_v4().simple());
-    let db = Database::new_in_memory().await?;
+    let slot_base_url = state
+        .shared_cache
+        .as_ref()
+        .map(|db| db.database_url())
+        .filter(|url| Database::is_postgres_url(url));
+    let db = Database::new_demo_slot(slot_base_url).await?;
     let permissions = UserPermissions {
         can_download: false,
         can_manage_favorites: true,
@@ -206,7 +211,7 @@ fn assign_slots(
         drop(state);
         for slot in discarded {
             let _ = slot.shutdown.send(true);
-            slot.db.pool().close().await;
+            slot.db.close().await;
         }
         match error {
             Some(error) => {
@@ -221,7 +226,7 @@ fn assign_slots(
 async fn close_visitor(visitor: Visitor) {
     if let Some(slot) = visitor.slot {
         let _ = slot.shutdown.send(true);
-        slot.db.pool().close().await;
+        slot.db.close().await;
     }
 }
 
@@ -598,6 +603,7 @@ pub async fn run_server(
     config: DemoConfig,
     base_path: &str,
     env_overrides: fmd_core::RuntimeEnvOverrides,
+    database_url: Option<String>,
 ) -> anyhow::Result<()> {
     fn reject_symlink(path: &Path) -> anyhow::Result<()> {
         match std::fs::symlink_metadata(path) {
@@ -613,12 +619,18 @@ pub async fn run_server(
         }
     }
 
-    let dir = Path::new("data/fmd-demo");
-    reject_symlink(dir)?;
-    std::fs::create_dir_all(dir).context("Failed to create demo data directory")?;
-    let cache_path = dir.join("public-cache.db");
-    reject_symlink(&cache_path)?;
-    let cache = Database::new(cache_path).await?;
+    let resolved_db_url =
+        Database::resolve_url(database_url.as_deref(), "data/fmd-demo/public-cache.db");
+    let cache = if Database::is_postgres_url(&resolved_db_url) {
+        Database::connect(&resolved_db_url).await?
+    } else {
+        let dir = Path::new("data/fmd-demo");
+        reject_symlink(dir)?;
+        std::fs::create_dir_all(dir).context("Failed to create demo data directory")?;
+        let cache_path = dir.join("public-cache.db");
+        reject_symlink(&cache_path)?;
+        Database::new(cache_path).await?
+    };
     let engine_raw = LuaModuleEngine::new_public_only().map_err(|e| anyhow::anyhow!("{e}"))?;
     let modules = if Path::new("lua/modules").exists() {
         engine_raw
@@ -1196,18 +1208,14 @@ mod tests {
             .slot
             .as_ref()
             .unwrap();
-        let metadata: (String, String, String, String) =
-            sqlx::query_as("SELECT cover_url, author, description, genres FROM mangas")
-                .fetch_one(visitor_slot.db.pool())
-                .await
-                .unwrap();
+        let metadata = visitor_slot.db.get_first_manga_meta().await.unwrap();
         assert_eq!(
             metadata,
             (
-                "https://example.com/cover.jpg".into(),
-                "Author".into(),
-                "Summary".into(),
-                "[\"Adventure\"]".into()
+                Some("https://example.com/cover.jpg".into()),
+                Some("Author".into()),
+                Some("Summary".into()),
+                Some("[\"Adventure\"]".into())
             )
         );
         let other_slot = state
@@ -1218,11 +1226,8 @@ mod tests {
             .slot
             .as_ref()
             .unwrap();
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM mangas")
-            .fetch_one(other_slot.db.pool())
-            .await
-            .unwrap();
-        assert_eq!(count.0, 0);
+        let count = other_slot.db.count_mangas().await.unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -1323,10 +1328,7 @@ mod tests {
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chapters")
-                    .fetch_one(db.pool())
-                    .await
-                    .unwrap();
+                let count = db.count_chapters().await.unwrap();
                 if count == 1 {
                     break;
                 }
@@ -1349,10 +1351,7 @@ mod tests {
                 assert_eq!(result["new_chapters_count"], 0);
             }
         }
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chapters")
-            .fetch_one(other_db.pool())
-            .await
-            .unwrap();
+        let count = other_db.count_chapters().await.unwrap();
         assert_eq!(count, 0);
 
         let cache = manager.lock().await.base.cache_db().clone();
@@ -1642,7 +1641,7 @@ mod tests {
             .status(),
             StatusCode::OK
         );
-        assert!(old_db.pool().is_closed());
+        assert!(old_db.is_closed());
         let (_, next) = reserve(&manager, Some(&second_cookie)).await;
         assert_eq!(next["status"], "reserved");
         assert_ne!(next["password"], first["password"]);

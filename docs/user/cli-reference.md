@@ -10,8 +10,9 @@ The `fmd` executable provides a command-line interface for headless automation, 
 fmd [OPTIONS] <COMMAND>
 
 Options:
-  -h, --help       Print help information
-  -V, --version    Print version information
+      --database-url <DATABASE_URL>  Database connection URL (sqlite://... or postgres://...) [env: FMD_DATABASE_URL=]
+  -h, --help                         Print help information
+  -V, --version                      Print version information
 ```
 
 ---
