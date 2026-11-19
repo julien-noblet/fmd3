@@ -631,6 +631,7 @@ pub async fn run_server(
         reject_symlink(&cache_path)?;
         Database::new(cache_path).await?
     };
+    let sfw_mode = crate::sfw::from_env(true)?;
     let engine_raw = LuaModuleEngine::new_public_only().map_err(|e| anyhow::anyhow!("{e}"))?;
     let modules = if Path::new("lua/modules").exists() {
         engine_raw
@@ -638,6 +639,11 @@ pub async fn run_server(
             .map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
         Vec::new()
+    };
+    let modules = if sfw_mode {
+        crate::sfw::filter_modules(modules).0
+    } else {
+        modules
     };
     let (ws_sender, _) = broadcast::channel(100);
     let (catalog_ws_sender, _) = broadcast::channel(100);
@@ -655,6 +661,7 @@ pub async fn run_server(
         login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
         internal_worker_token: generate_secure_token(),
         env_overrides,
+        sfw_mode,
     };
     let fallback = build_router(base.clone(), base_path);
     let mut sync_state = base.clone();
@@ -781,6 +788,7 @@ mod tests {
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: generate_secure_token(),
             env_overrides: fmd_core::RuntimeEnvOverrides::default(),
+            sfw_mode: false,
         };
         let fallback = build_router(base.clone(), "");
         Arc::new(Mutex::new(Manager {

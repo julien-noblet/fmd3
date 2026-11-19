@@ -22,6 +22,7 @@ async fn spawn_test_server(db: Database) -> (String, tokio::task::JoinHandle<()>
         login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
         internal_worker_token: "e2e-internal-token".to_string(),
         env_overrides: RuntimeEnvOverrides::default(),
+        sfw_mode: false,
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

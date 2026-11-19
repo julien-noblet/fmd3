@@ -105,6 +105,7 @@ You can enforce server-wide defaults/overrides for scraping delays and backgroun
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `FMD_DATABASE_URL` | `sqlite://data/fmd.db` | Database connection URL (`sqlite://...` or `postgres://...` / `postgresql://...`). In demo mode with PostgreSQL, visitor slots use isolated ephemeral `demo_slot_*` schemas. |
+| `FMD_SFW_MODE` | `true` in demo mode, `false` otherwise | When `true`, hides adult/hentai website modules and blocks adult, hentai, ecchi, and mature content across catalog search, manga fetching, and favorites. |
 | `FMD_MIN_DELAY_MS` | `1000` | Minimum anti-ban delay in milliseconds between consecutive requests to the same module (`>= 0`). |
 | `FMD_CHECK_INTERVAL_HOURS` | `1` | Interval in hours for checking tracked favorites (`>= 1`). |
 | `FMD_CATALOG_RESYNC_DAYS` | `7` | Interval in days for scheduled catalog resynchronization (`>= 1`). |
