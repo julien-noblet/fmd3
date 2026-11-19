@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 
 pub mod auth;
 mod demo;
+pub mod sfw;
 
 const LOGO_PNG: &[u8] = include_bytes!("../../../images/logo-256.png");
 const FAVICON_ICO: &[u8] = include_bytes!("../../../images/favicon.ico");
@@ -45,6 +46,7 @@ pub struct AppState {
     pub login_rate_limiter: Arc<auth::LoginRateLimiter>,
     pub internal_worker_token: String,
     pub env_overrides: fmd_core::RuntimeEnvOverrides,
+    pub sfw_mode: bool,
 }
 
 impl AppState {
@@ -60,6 +62,14 @@ impl AppState {
 
     pub fn effective_min_delay_ms(&self, policy_delay_ms: u64) -> u64 {
         self.env_overrides.effective_min_delay_ms(policy_delay_ms)
+    }
+
+    fn is_module_allowed(&self, module_id: &str) -> bool {
+        !self.sfw_mode
+            || self
+                .modules
+                .iter()
+                .any(|m| m.id == module_id || m.name.eq_ignore_ascii_case(module_id))
     }
 }
 
@@ -348,6 +358,7 @@ pub async fn run_server(addr: SocketAddr, database_url: Option<String>) -> anyho
     if let Some(config) = demo::DemoConfig::from_env()? {
         return demo::run_server(addr, config, &base_path, env_overrides, database_url).await;
     }
+    let sfw_mode = sfw::from_env(false)?;
     let db_url = Database::resolve_url(database_url.as_deref(), "data/fmd.db");
     let db = Database::connect(&db_url).await?;
 
@@ -365,6 +376,11 @@ pub async fn run_server(addr: SocketAddr, database_url: Option<String>) -> anyho
             .unwrap_or_default()
     } else {
         Vec::new()
+    };
+    let modules = if sfw_mode {
+        sfw::filter_modules(modules).0
+    } else {
+        modules
     };
 
     let engine = Arc::new(Mutex::new(engine_raw));
@@ -442,6 +458,7 @@ pub async fn run_server(addr: SocketAddr, database_url: Option<String>) -> anyho
         login_rate_limiter,
         internal_worker_token,
         env_overrides,
+        sfw_mode,
     };
 
     // Spawn background task scheduler (auto-resync and chapter checking)
@@ -1230,6 +1247,12 @@ async fn load_manga_info(
     req: &FetchMangaRequest,
     allow_force: bool,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if !state.is_module_allowed(&req.module_id) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            sfw::SFW_BLOCKED_MESSAGE.into(),
+        ));
+    }
     let manga_id = format!("{}:{}", req.module_id, req.url);
     if state.shared_cache.is_some()
         && (req.url.contains("://") || req.url.starts_with("//"))
@@ -1252,6 +1275,12 @@ async fn load_manga_info(
                     serde_json::from_str::<MangaInfoResult>(&cached.metadata_json),
                     serde_json::from_str::<Vec<fmd_engine_lua::ChapterItem>>(&cached.chapters_json),
                 ) {
+                    if state.sfw_mode && sfw::has_adult_genre(&info.genres) {
+                        return Err((
+                            axum::http::StatusCode::FORBIDDEN,
+                            sfw::SFW_BLOCKED_MESSAGE.into(),
+                        ));
+                    }
                     info.chapters = chapters;
                     save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
                     let mut val = serde_json::to_value(&info).unwrap_or_default();
@@ -1303,6 +1332,12 @@ async fn load_manga_info(
     let engine = state.engine.lock().await;
     match engine.get_manga_info(&module.file_path, &req.url) {
         Ok(info) => {
+            if state.sfw_mode && sfw::has_adult_genre(&info.genres) {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    sfw::SFW_BLOCKED_MESSAGE.into(),
+                ));
+            }
             save_fetched_manga_metadata(&state.db, &manga_id, req, &info).await?;
 
             let now = chrono::Utc::now();
@@ -1400,6 +1435,9 @@ async fn get_alternative_sources(
     let mut seen = std::collections::HashSet::new();
 
     for item in items {
+        if !state.is_module_allowed(&item.module_id) {
+            continue;
+        }
         if !exclude.is_empty()
             && (item.module_id == exclude || item.module_id.eq_ignore_ascii_case(&exclude))
         {
@@ -1591,6 +1629,14 @@ async fn add_favorite(
         ));
     }
     let user_id = Some(ctx.user.id.as_str());
+    if !state.is_module_allowed(&req.module_id)
+        || (state.sfw_mode && req.genres.as_deref().is_some_and(sfw::has_adult_genre))
+    {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            sfw::SFW_BLOCKED_MESSAGE.into(),
+        ));
+    }
     let manga_id = format!("{}:{}", req.module_id, req.url);
     if state.shared_cache.is_some() && req.auto_download == Some(true) {
         return Err((
@@ -2481,11 +2527,31 @@ async fn search_catalog(
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let (items, total) = state
+    if let Some(ref id) = m_id {
+        if !state.is_module_allowed(id) {
+            return Json(CatalogResponse {
+                items: Vec::new(),
+                total: 0,
+                limit,
+                offset,
+            });
+        }
+    }
+
+    let (mut items, mut total) = state
         .cache_db()
         .search_catalog(&q, m_id.as_deref(), limit, offset)
         .await
         .unwrap_or_default();
+
+    if state.sfw_mode {
+        let before = items.len();
+        items.retain(|item| state.is_module_allowed(&item.module_id));
+        let removed = before.saturating_sub(items.len()) as i64;
+        if removed > 0 {
+            total = total.saturating_sub(removed);
+        }
+    }
 
     Json(CatalogResponse {
         items,
@@ -2507,16 +2573,21 @@ async fn get_catalog_status(
     State(state): State<AppState>,
 ) -> Json<CatalogStatusResponse> {
     let active = state.sync_manager.get_active_info().await;
-    let modules = state
+    let mut modules = state
         .cache_db()
         .list_all_sync_statuses()
         .await
         .unwrap_or_default();
-    let total_catalog_items = state
-        .cache_db()
-        .get_catalog_total_count()
-        .await
-        .unwrap_or(0);
+    let total_catalog_items = if state.sfw_mode {
+        modules.retain(|m| state.is_module_allowed(&m.module_id));
+        modules.iter().map(|m| m.total_mangas).sum()
+    } else {
+        state
+            .cache_db()
+            .get_catalog_total_count()
+            .await
+            .unwrap_or(0)
+    };
 
     Json(CatalogStatusResponse {
         active,
@@ -2856,6 +2927,7 @@ mod tests {
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: "test_internal_token".to_string(),
             env_overrides: fmd_core::RuntimeEnvOverrides::default(),
+            sfw_mode: false,
         };
 
         let dl_id = "test-dl-1";
@@ -3038,6 +3110,7 @@ mod tests {
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: "test_internal_token".to_string(),
             env_overrides: fmd_core::RuntimeEnvOverrides::default(),
+            sfw_mode: false,
         };
 
         let req = QueueDownloadRequest {
@@ -3122,6 +3195,7 @@ mod tests {
             login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
             internal_worker_token: "test_internal_token".to_string(),
             env_overrides: fmd_core::RuntimeEnvOverrides::default(),
+            sfw_mode: false,
         };
 
         // Initially no users -> setup_needed must be true
@@ -3294,6 +3368,7 @@ mod tests {
                 check_interval_hours: Some(6),
                 catalog_resync_days: Some(14),
             },
+            sfw_mode: false,
         };
 
         assert_eq!(state.effective_min_delay_ms(100), 2500);
@@ -3337,5 +3412,133 @@ mod tests {
         let settings: fmd_core::AppSettings = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(settings.check_interval_hours, 6);
         assert_eq!(settings.catalog_resync_days, 14);
+    }
+
+    #[tokio::test]
+    async fn sfw_mode_blocks_adult_modules_and_genres() {
+        let db = Database::new_in_memory().await.unwrap();
+        let admin = db
+            .create_user(
+                "admin",
+                Some("password"),
+                fmd_core::Role::Admin,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let token = db.create_session(&admin.id, None, None, 1).await.unwrap();
+
+        let sfw_module = WebsiteModule {
+            id: "sfw-mod".into(),
+            name: "SafeManga".into(),
+            root_url: "https://safemanga.example".into(),
+            category: "English".into(),
+            file_path: "lua/modules/SafeManga.lua".into(),
+            ..Default::default()
+        };
+        let adult_module = WebsiteModule {
+            id: "adult-mod".into(),
+            name: "NHentai".into(),
+            root_url: "https://nhentai.net".into(),
+            category: "H-Sites".into(),
+            file_path: "lua/modules/NHentai.lua".into(),
+            ..Default::default()
+        };
+        let (filtered_modules, _) = sfw::filter_modules(vec![sfw_module.clone(), adult_module]);
+        assert_eq!(filtered_modules.len(), 1);
+        assert_eq!(filtered_modules[0].id, "sfw-mod");
+
+        let now = chrono::Utc::now();
+        let adult_genre_info = MangaInfoResult {
+            title: "Adult Series".into(),
+            genres: vec!["Action".into(), "Mature".into()],
+            ..Default::default()
+        };
+        db.save_manga_cache(&fmd_core::MangaCacheItem {
+            manga_id: "sfw-mod:/adult-series".into(),
+            module_id: "sfw-mod".into(),
+            title: "Adult Series".into(),
+            cover_url: None,
+            metadata_json: serde_json::to_string(&adult_genre_info).unwrap(),
+            chapters_json: "[]".into(),
+            cached_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+        })
+        .await
+        .unwrap();
+
+        let (ws_sender, _) = broadcast::channel(10);
+        let state = AppState {
+            db,
+            shared_cache: None,
+            demo_shutdown: None,
+            engine: Arc::new(Mutex::new(LuaModuleEngine::new().unwrap())),
+            modules: Arc::new(filtered_modules),
+            ws_sender,
+            catalog_ws_sender: None,
+            sync_manager: Arc::new(CatalogSyncManager::new()),
+            nats_context: None,
+            throttler: auth::DomainThrottler::new(),
+            login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
+            internal_worker_token: "test_internal_token".to_string(),
+            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
+            sfw_mode: true,
+        };
+        let app = build_router(state, "");
+
+        // 1. Blocked module is rejected by /api/manga/fetch
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/api/manga/fetch")
+                    .header(axum::http::header::COOKIE, format!("fmd_session={token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"module_id":"adult-mod","url":"/g/1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::FORBIDDEN);
+
+        // 2. Generalist module manga with adult/mature genre is rejected by /api/manga/fetch
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/api/manga/fetch")
+                    .header(axum::http::header::COOKIE, format!("fmd_session={token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"module_id":"sfw-mod","url":"/adult-series"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::FORBIDDEN);
+
+        // 3. Adult-genre favorite is rejected by /api/favorites
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/api/favorites")
+                    .header(axum::http::header::COOKIE, format!("fmd_session={token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"module_id":"sfw-mod","url":"/x","title":"X","genres":["Ecchi"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::FORBIDDEN);
     }
 }
