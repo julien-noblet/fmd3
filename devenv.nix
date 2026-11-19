@@ -21,7 +21,14 @@
     sqlite
     postgresql
     nodejs
+    chromium
   ];
+
+  enterShell = ''
+    if [ -d /run/current-system ] && [ -z "''${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}" ]; then
+      export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="${lib.getExe pkgs.chromium}"
+    fi
+  '';
 
   languages.rust.enable = true;
 
@@ -87,6 +94,11 @@
       export FMD_TEST_POSTGRES_URL="$FMD_DATABASE_URL"
       cargo test -p fmd-core --test postgres_integration -- --ignored --nocapture
       cargo test -p fmd-cli --test nats_worker_integration -- --ignored --nocapture
+    '';
+    test-e2e.exec = ''
+      set -euo pipefail
+      cargo build --bin fmd
+      npm --prefix e2e test
     '';
   };
 
