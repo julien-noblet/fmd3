@@ -125,10 +125,15 @@ fn canonicalize_with_tail(path: &Path) -> std::result::Result<PathBuf, String> {
     Ok(resolved)
 }
 
-fn sandbox_allowed_roots(write: bool) -> std::result::Result<Vec<PathBuf>, String> {
+fn sandbox_allowed_roots(
+    write: bool,
+    custom_userdata: Option<&Path>,
+) -> std::result::Result<Vec<PathBuf>, String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("Failed to resolve current working directory: {}", e))?;
-    let userdata_dir = cwd.join("userdata");
+    let userdata_dir = custom_userdata
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.join("userdata"));
     if write {
         std::fs::create_dir_all(&userdata_dir)
             .map_err(|e| format!("Failed to prepare Lua userdata directory: {}", e))?;
@@ -151,7 +156,11 @@ fn sandbox_allowed_roots(write: bool) -> std::result::Result<Vec<PathBuf>, Strin
     Ok(roots)
 }
 
-fn resolve_sandboxed_path(raw_path: &str, write: bool) -> std::result::Result<PathBuf, String> {
+fn resolve_sandboxed_path(
+    raw_path: &str,
+    write: bool,
+    custom_userdata: Option<&Path>,
+) -> std::result::Result<PathBuf, String> {
     if raw_path.is_empty() || raw_path.contains('\0') {
         return Err("Invalid empty or NUL-containing path".into());
     }
@@ -159,6 +168,20 @@ fn resolve_sandboxed_path(raw_path: &str, write: bool) -> std::result::Result<Pa
         .map_err(|e| format!("Failed to resolve current working directory: {}", e))?;
     let candidate = if Path::new(raw_path).is_absolute() {
         PathBuf::from(raw_path)
+    } else if let Some(dir) = custom_userdata.filter(|_| {
+        raw_path == "userdata"
+            || raw_path.starts_with("userdata/")
+            || raw_path.starts_with("userdata\\")
+    }) {
+        let suffix = raw_path
+            .strip_prefix("userdata/")
+            .or_else(|| raw_path.strip_prefix("userdata\\"))
+            .unwrap_or("");
+        if suffix.is_empty() {
+            dir.to_path_buf()
+        } else {
+            dir.join(suffix)
+        }
     } else if !write
         && !cwd.join("lua").exists()
         && cwd.join("../../lua").exists()
@@ -169,7 +192,7 @@ fn resolve_sandboxed_path(raw_path: &str, write: bool) -> std::result::Result<Pa
         cwd.join(raw_path)
     };
     let resolved = canonicalize_with_tail(&candidate)?;
-    let roots = sandbox_allowed_roots(write)?;
+    let roots = sandbox_allowed_roots(write, custom_userdata)?;
     if roots.iter().any(|root| resolved.starts_with(root)) {
         Ok(resolved)
     } else {
@@ -200,6 +223,14 @@ impl LuaModuleEngine {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_userdata_dir(userdata_dir: PathBuf) -> Result<Self> {
+        Self::with_http_client_and_userdata(
+            HttpClient::new().map_err(|e| EngineError::Custom(e.to_string()))?,
+            Some(userdata_dir),
+        )
+    }
+
     fn reset_execution_budget(&self) {
         if let Ok(mut budget) = self.execution_budget.lock() {
             budget.reset();
@@ -207,6 +238,14 @@ impl LuaModuleEngine {
     }
 
     fn with_http_client(http_client: HttpClient) -> Result<Self> {
+        Self::with_http_client_and_userdata(http_client, None)
+    }
+
+    fn with_http_client_and_userdata(
+        http_client: HttpClient,
+        custom_userdata: Option<PathBuf>,
+    ) -> Result<Self> {
+        let custom_userdata = Arc::new(custom_userdata);
         let lua = Lua::new();
         lua.set_memory_limit(LUA_MEMORY_LIMIT_BYTES)?;
 
@@ -269,13 +308,14 @@ impl LuaModuleEngine {
             let _ = io_tbl.set("tmpfile", mlua::Value::Nil);
 
             if let Ok(orig_open) = io_tbl.get::<mlua::Function>("open") {
+                let ud_open = custom_userdata.clone();
                 let safe_open =
                     lua.create_function(move |_lua, (path, mode): (String, Option<String>)| {
                         let mode_str = mode.as_deref().unwrap_or("r");
                         let write = mode_str.contains('w')
                             || mode_str.contains('a')
                             || mode_str.contains('+');
-                        let resolved = resolve_sandboxed_path(&path, write)
+                        let resolved = resolve_sandboxed_path(&path, write, ud_open.as_deref())
                             .map_err(mlua::Error::RuntimeError)?;
                         orig_open
                             .call::<mlua::Value>((resolved.to_string_lossy().into_owned(), mode))
@@ -284,11 +324,12 @@ impl LuaModuleEngine {
             }
 
             if let Ok(orig_lines) = io_tbl.get::<mlua::Function>("lines") {
+                let ud_lines = custom_userdata.clone();
                 let safe_lines = lua.create_function(move |lua, args: mlua::MultiValue| {
                     let mut out_args = args.into_vec();
                     if let Some(mlua::Value::String(path)) = out_args.first() {
                         let raw = path.to_str()?.to_string();
-                        let resolved = resolve_sandboxed_path(&raw, false)
+                        let resolved = resolve_sandboxed_path(&raw, false, ud_lines.as_deref())
                             .map_err(mlua::Error::RuntimeError)?;
                         let s = lua.create_string(resolved.to_string_lossy().as_bytes())?;
                         out_args[0] = mlua::Value::String(s);
@@ -299,11 +340,12 @@ impl LuaModuleEngine {
             }
 
             if let Ok(orig_input) = io_tbl.get::<mlua::Function>("input") {
+                let ud_input = custom_userdata.clone();
                 let safe_input =
                     lua.create_function(move |lua, arg: Option<mlua::Value>| match arg {
                         Some(mlua::Value::String(path)) => {
                             let raw = path.to_str()?.to_string();
-                            let resolved = resolve_sandboxed_path(&raw, false)
+                            let resolved = resolve_sandboxed_path(&raw, false, ud_input.as_deref())
                                 .map_err(mlua::Error::RuntimeError)?;
                             let s = lua.create_string(resolved.to_string_lossy().as_bytes())?;
                             orig_input.call::<mlua::Value>(Some(mlua::Value::String(s)))
@@ -314,11 +356,12 @@ impl LuaModuleEngine {
             }
 
             if let Ok(orig_output) = io_tbl.get::<mlua::Function>("output") {
+                let ud_output = custom_userdata.clone();
                 let safe_output =
                     lua.create_function(move |lua, arg: Option<mlua::Value>| match arg {
                         Some(mlua::Value::String(path)) => {
                             let raw = path.to_str()?.to_string();
-                            let resolved = resolve_sandboxed_path(&raw, true)
+                            let resolved = resolve_sandboxed_path(&raw, true, ud_output.as_deref())
                                 .map_err(mlua::Error::RuntimeError)?;
                             let s = lua.create_string(resolved.to_string_lossy().as_bytes())?;
                             orig_output.call::<mlua::Value>(Some(mlua::Value::String(s)))
@@ -1111,32 +1154,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires live external network access"]
-    fn test_lelscan_xpath_diagnostic() {
-        let engine = LuaModuleEngine::new().unwrap();
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path =
-            std::path::Path::new(&manifest_dir).join("../../lua/modules/LelscanFR.lua");
-        let m = engine.load_file(&module_path).unwrap().unwrap();
-        println!("Loaded module: {}", m.name);
-
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let res = engine.update_catalog(module_path.to_str().unwrap(), cancel, |entries, prog| {
-            println!(
-                "Got {} entries on page {}",
-                entries.len(),
-                prog.current_page
-            );
-            for e in entries.iter().take(3) {
-                println!("  entry: {} -> {}", e.title, e.link);
-            }
-            Ok(())
-        });
-        println!("update_catalog result: {:?}", res);
-        assert!(res.unwrap() > 0);
-    }
-
-    #[test]
     fn test_lua_engine_init_and_js_execution() {
         let engine = LuaModuleEngine::new().unwrap();
         // Test JS unpacker / Duktape emulation via boa_engine
@@ -1179,67 +1196,6 @@ mod tests {
         assert_eq!(module.root_url, "https://fr.novelcool.com");
     }
 
-    #[tokio::test]
-    #[ignore = "requires live external network access"]
-    async fn test_novelcool_fr_get_info() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path =
-            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
-
-        let engine = LuaModuleEngine::new().unwrap();
-        let res = engine.get_manga_info(
-            module_path.to_str().unwrap(),
-            "https://fr.novelcool.com/novel/Jujutsu-Kaisen.html",
-        );
-
-        let info = res.expect("get_manga_info on NovelCoolFR failed");
-        println!("Title: {}", info.title);
-        println!("Chapters count: {}", info.chapters.len());
-        assert!(!info.title.is_empty());
-        assert!(!info.chapters.is_empty());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live external network access"]
-    async fn test_novelcool_fr_get_chapter_pages() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path =
-            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
-
-        let engine = LuaModuleEngine::new().unwrap();
-        let res = engine.get_chapter_pages(
-            module_path.to_str().unwrap(),
-            "https://fr.novelcool.com/chapter/Chapitre-131/5271027/",
-        );
-
-        let pages = res.expect("get_chapter_pages on NovelCoolFR failed");
-        println!("Pages count: {}", pages.len());
-        if let Some(p) = pages.first() {
-            println!("First page URL: {}", p);
-        }
-        assert_eq!(pages.len(), 21);
-    }
-
-    #[test]
-    #[ignore = "requires live external network access"]
-    fn test_novelcool_fr_fetch_catalog_page() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path =
-            std::path::Path::new(&manifest_dir).join("../../lua/modules/NovelCoolFR.lua");
-
-        let engine = LuaModuleEngine::new().unwrap();
-        let (entries, total_pages) = engine
-            .fetch_catalog_page(module_path.to_str().unwrap(), 0, 0)
-            .expect("fetch_catalog_page on NovelCoolFR failed");
-
-        println!("Catalog entries on page 0: {}", entries.len());
-        println!("Detected total pages: {:?}", total_pages);
-        if let Some(first) = entries.first() {
-            println!("First manga: {} -> {}", first.title, first.link);
-        }
-        assert!(!entries.is_empty());
-    }
-
     #[test]
     fn test_sushiscan_cover_xpath() {
         let html = r#"<div class="thumb" itemprop="image"><img src="https://sushiscan.net/wp-content/uploads/OnePieceCov.jpg" /></div>"#;
@@ -1254,110 +1210,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "requires live external network access"]
-    async fn test_sushiscan_cover_fetch() {
-        let client = fmd_net::HttpClient::new().unwrap();
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("Referer".into(), "https://sushiscan.net/".into());
-        let res = client
-            .get_bytes_with_headers(
-                "https://sushiscan.net/wp-content/uploads/RoadToLaughTaleCover.png",
-                &headers,
-            )
-            .await;
-        match res {
-            Ok(bytes) => println!("Success fetching cover! Received {} bytes", bytes.len()),
-            Err(e) => println!("Error fetching cover: {}", e),
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live external network access"]
-    async fn test_mangaplus_get_info() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path =
-            std::path::Path::new(&manifest_dir).join("../../lua/modules/MangaPlus.lua");
-
-        let engine = LuaModuleEngine::new().unwrap();
-        let res = engine.get_manga_info(
-            module_path.to_str().unwrap(),
-            "https://mangaplus.shueisha.co.jp/titles/100034",
-        );
-
-        let info = res.expect("get_manga_info on MangaPlus failed");
-        println!("MangaPlus Title: {}", info.title);
-        println!("MangaPlus Chapters count: {}", info.chapters.len());
-        println!(
-            "MangaPlus Alternate versions: {:?}",
-            info.alternate_versions
-        );
-        assert!(!info.title.is_empty());
-        assert!(!info.chapters.is_empty());
-        assert!(!info.alternate_versions.is_empty());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live external network access"]
-    async fn test_mangaplus_french_info_and_download() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let module_path =
-            std::path::Path::new(&manifest_dir).join("../../lua/modules/MangaPlus.lua");
-
-        let engine = LuaModuleEngine::new().unwrap();
-        // Test French edition directly
-        let res = engine.get_manga_info(
-            module_path.to_str().unwrap(),
-            "https://mangaplus.shueisha.co.jp/titles/700004",
-        );
-
-        let info = res.expect("get_manga_info on French MangaPlus failed");
-        println!("French Title: {}", info.title);
-        assert!(info.title.contains("[FR]"));
-        assert!(!info.chapters.is_empty());
-
-        let first_ch = &info.chapters[0];
-        println!(
-            "First French chapter: {} ({})",
-            first_ch.title, first_ch.url
-        );
-
-        let pages = engine
-            .get_chapter_pages(module_path.to_str().unwrap(), &first_ch.url)
-            .expect("get_chapter_pages on French MangaPlus failed");
-        println!("Pages count: {}", pages.len());
-        assert!(!pages.is_empty());
-
-        // Test downloading & decrypting page 1
-        let first_page_url = &pages[0];
-        let img_bytes = engine
-            .download_custom_image(module_path.to_str().unwrap(), first_page_url, 0)
-            .expect("download_image on MangaPlus failed")
-            .expect("image bytes empty");
-
-        println!(
-            "Downloaded & decrypted page size: {} bytes",
-            img_bytes.len()
-        );
-        assert!(img_bytes.len() > 1000);
-        // Verify JPEG or PNG or WebP header
-        let is_jpeg = img_bytes.starts_with(&[0xFF, 0xD8]);
-        let is_png = img_bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]);
-        let is_webp =
-            img_bytes.len() >= 12 && &img_bytes[0..4] == b"RIFF" && &img_bytes[8..12] == b"WEBP";
-        assert!(
-            is_jpeg || is_png || is_webp,
-            "Decrypted image is not a valid image format"
-        );
-        println!(
-            "Decrypted image format verified! (JPEG: {}, PNG: {}, WebP: {})",
-            is_jpeg, is_png, is_webp
-        );
-    }
-
     #[test]
     fn test_lua_sandbox_hardening() {
-        let engine = LuaModuleEngine::new().expect("Failed to create LuaModuleEngine");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let engine = LuaModuleEngine::new_with_userdata_dir(temp_dir.path().to_path_buf())
+            .expect("Failed to create LuaModuleEngine");
         let lua = &engine.lua;
 
         // Verify dangerous os/io/global primitives are disabled
@@ -1390,6 +1247,7 @@ mod tests {
             "return io.open('//etc/passwd', 'r')",
             "return io.open('/./etc/passwd', 'r')",
             "return io.open('../../Cargo.toml', 'r')",
+            "return io.open('userdata/../../Cargo.toml', 'w')",
             "return io.open('lua/modules/sandbox_write_test.lua', 'w')",
             "return io.lines('/etc/passwd')",
             "return io.input('/etc/passwd')",
@@ -1414,11 +1272,8 @@ mod tests {
             .unwrap();
         assert!(proto_ok, "Legitimate lua/modules/*.proto read must succeed");
 
-        // Verify legitimate userdata/ write + read workflow (MangaDex mapping pattern)
-        let userdata_dir = std::env::current_dir().unwrap().join("userdata");
-        let userdata_existed = userdata_dir.exists();
+        // Verify legitimate userdata/ write + read workflow isolated in temp_dir
         let mapping_rel = "userdata/_sandbox_test_mapping.txt";
-        let mapping_abs = userdata_dir.join("_sandbox_test_mapping.txt");
         let rw_ok: bool = lua
             .load(format!(
                 r#"
@@ -1436,13 +1291,13 @@ mod tests {
             ))
             .eval()
             .unwrap();
-        let _ = std::fs::remove_file(&mapping_abs);
-        if !userdata_existed {
-            let _ = std::fs::remove_dir(&userdata_dir);
-        }
         assert!(
             rw_ok,
             "Legitimate userdata/ write & io.lines read must succeed"
+        );
+        assert!(
+            temp_dir.path().join("_sandbox_test_mapping.txt").exists(),
+            "Sandbox userdata write must stay inside isolated temp dir"
         );
     }
 

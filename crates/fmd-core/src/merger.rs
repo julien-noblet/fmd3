@@ -329,4 +329,98 @@ mod tests {
         assert!(!ch271.is_gap_fill);
         assert_eq!(ch271.selected_source.module_id, "mangaplus");
     }
+
+    #[test]
+    fn test_merge_decimals_multi_fallback_unnumbered_and_sorting() {
+        // Primary in descending order, with decimal chapter & missing chapter 2 + 4 + unnumbered Prologue
+        let primary = vec![
+            ChapterItem {
+                title: "Chapitre 5".into(),
+                url: "p/5".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 3.5".into(),
+                url: "p/3.5".into(),
+            },
+            ChapterItem {
+                title: "Chapitre 1".into(),
+                url: "p/1".into(),
+            },
+            ChapterItem {
+                title: "Prologue".into(),
+                url: "p/prologue".into(),
+            },
+        ];
+
+        // First fallback provides Ch 2 and Ch 3.5 duplicate
+        let fb1 = vec![
+            ChapterItem {
+                title: "Ch. 2".into(),
+                url: "fb1/2".into(),
+            },
+            ChapterItem {
+                title: "Ch. 3.5".into(),
+                url: "fb1/3.5".into(),
+            },
+            ChapterItem {
+                title: "Prologue".into(),
+                url: "fb1/prologue".into(),
+            },
+        ];
+
+        // Second fallback also has Ch 2 (should be listed in available_sources, not overwrite selected fb1) + Ch 4 + Bonus
+        let fb2 = vec![
+            ChapterItem {
+                title: "Ch. 2".into(),
+                url: "fb2/2".into(),
+            },
+            ChapterItem {
+                title: "Ch. 4".into(),
+                url: "fb2/4".into(),
+            },
+            ChapterItem {
+                title: "Bonus".into(),
+                url: "fb2/bonus".into(),
+            },
+        ];
+
+        let res = merge_chapter_sources(
+            ("prim", "Primary"),
+            &primary,
+            &[(("fb1", "FB1"), &fb1), (("fb2", "FB2"), &fb2)],
+        );
+
+        assert_eq!(res.primary_count, 4); // Prologue, 1, 3.5, 5
+        assert_eq!(res.filled_count, 3); // 2, 4, Bonus
+        assert_eq!(res.total_chapters, 7);
+        assert_eq!(res.gaps_detected.len(), 2); // 1->3.5 (ch 2) and 3.5->5 (ch 4)
+
+        // Unnumbered primary comes first, numbered sorted ascending, unnumbered fallback last
+        assert_eq!(res.chapters[0].title, "Prologue");
+        assert!(!res.chapters[0].is_gap_fill);
+        assert_eq!(res.chapters[1].display_number, "1");
+        assert_eq!(res.chapters[2].display_number, "2");
+        assert_eq!(res.chapters[2].selected_source.module_id, "fb1");
+        assert_eq!(res.chapters[2].available_sources.len(), 2);
+        assert_eq!(res.chapters[3].display_number, "3.5");
+        assert_eq!(res.chapters[3].selected_source.module_id, "prim");
+        assert_eq!(res.chapters[3].available_sources.len(), 2);
+        assert_eq!(res.chapters[4].display_number, "4");
+        assert_eq!(res.chapters[4].selected_source.module_id, "fb2");
+        assert_eq!(res.chapters[5].display_number, "5");
+        assert_eq!(res.chapters[6].title, "Bonus");
+        assert!(res.chapters[6].is_gap_fill);
+    }
+
+    #[test]
+    fn test_merge_empty_sources_and_single_chapter_gap_description() {
+        let empty = merge_chapter_sources(("p", "P"), &[], &[]);
+        assert_eq!(empty.total_chapters, 0);
+        assert!(empty.gaps_detected.is_empty());
+
+        let gaps = detect_chapter_gaps(&[1.0, 3.0]);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].count, 1);
+        assert_eq!(gaps[0].description, "Chapitre 2 manquant");
+    }
 }

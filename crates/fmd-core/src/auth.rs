@@ -193,10 +193,34 @@ mod tests {
     #[test]
     fn test_token_generation_and_hashing() {
         let token = generate_secure_token();
+        let token2 = generate_secure_token();
         assert_eq!(token.len(), 64);
+        assert_ne!(token, token2);
         let hash1 = hash_token(&token);
         let hash2 = hash_token(&token);
         assert_eq!(hash1, hash2);
         assert_ne!(token, hash1);
+    }
+
+    #[test]
+    fn test_role_permissions_and_malformed_hash() {
+        assert_eq!(Role::from_str("admin"), Role::Admin);
+        assert_eq!(Role::from_str("ADMIN"), Role::Admin);
+        assert_eq!(Role::from_str("user"), Role::User);
+        assert_eq!(Role::from_str("unexpected"), Role::User);
+        assert_eq!(Role::Admin.as_str(), "admin");
+        assert!(Role::Admin.is_admin());
+        assert!(!Role::User.is_admin());
+
+        let admin_perms = UserPermissions::admin_defaults("u1");
+        assert!(admin_perms.can_trigger_catalog_sync);
+        assert!(admin_perms.can_force_refresh);
+
+        let user_perms = UserPermissions::user_defaults("u2");
+        assert!(user_perms.can_download);
+        assert!(!user_perms.can_trigger_catalog_sync);
+        assert!(!user_perms.can_force_refresh);
+
+        assert!(!verify_password("secret", "not-a-valid-argon2-hash"));
     }
 }

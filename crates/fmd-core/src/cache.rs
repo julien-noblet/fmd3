@@ -121,5 +121,56 @@ mod tests {
         };
         let exp_days = policy_days.calculate_expiration(now);
         assert_eq!((exp_days - now).num_days(), 2);
+
+        let policy_hours = ModuleCachePolicy {
+            ttl_unit: TtlUnit::Hours,
+            ttl_value: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            (policy_hours.calculate_expiration(now) - now).num_hours(),
+            5
+        );
+
+        let policy_weeks = ModuleCachePolicy {
+            ttl_unit: TtlUnit::Weeks,
+            ttl_value: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            (policy_weeks.calculate_expiration(now) - now).num_weeks(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_ttl_unit_parsing_and_cache_item_expiration() {
+        assert_eq!(TtlUnit::from_str_loose("min"), TtlUnit::Minutes);
+        assert_eq!(TtlUnit::from_str_loose("HRS"), TtlUnit::Hours);
+        assert_eq!(TtlUnit::from_str_loose("days"), TtlUnit::Days);
+        assert_eq!(TtlUnit::from_str_loose("w"), TtlUnit::Weeks);
+        assert_eq!(TtlUnit::from_str_loose("unknown"), TtlUnit::Hours);
+        assert_eq!(TtlUnit::Weeks.as_str(), "weeks");
+
+        let now = Utc::now();
+        let expired = MangaCacheItem {
+            manga_id: "m:1".into(),
+            module_id: "m".into(),
+            title: "T".into(),
+            cover_url: None,
+            metadata_json: "{}".into(),
+            chapters_json: "[]".into(),
+            cached_at: now - Duration::hours(2),
+            expires_at: now - Duration::minutes(1),
+        };
+        assert!(expired.is_expired());
+        assert_eq!(expired.remaining_seconds(), 0);
+
+        let fresh = MangaCacheItem {
+            expires_at: now + Duration::minutes(10),
+            ..expired
+        };
+        assert!(!fresh.is_expired());
+        assert!(fresh.remaining_seconds() > 500);
     }
 }

@@ -127,3 +127,55 @@ pub fn create_alternate_versions_table(
     )?;
     Ok((table, items))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_list_add_index_reverse_and_clear() {
+        let lua = Lua::new();
+        let (tbl, items) = create_string_list_table(&lua).unwrap();
+        lua.globals().set("LIST", tbl).unwrap();
+
+        let (count_before, first, second, count_after_clear): (i64, String, String, i64) = lua
+            .load(
+                r#"
+                LIST.Add('alpha')
+                LIST.Add('beta')
+                LIST[3] = 'delta'
+                LIST.Reverse()
+                local c1 = LIST.Count
+                local i0 = LIST[0]
+                local i1 = LIST[1]
+                LIST.Clear()
+                return c1, i0, i1, LIST.Count
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(count_before, 4); // ['alpha', 'beta', '', 'delta'] -> reversed
+        assert_eq!(first, "delta");
+        assert_eq!(second, "");
+        assert_eq!(count_after_clear, 0);
+        assert!(items.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_alternate_versions_table() {
+        let lua = Lua::new();
+        let (tbl, versions) = create_alternate_versions_table(&lua).unwrap();
+        lua.globals().set("ALTS", tbl).unwrap();
+
+        lua.load("ALTS.Add('fr', 'One Piece FR', 'https://example.com/fr')")
+            .exec()
+            .unwrap();
+
+        let guard = versions.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].language, "fr");
+        assert_eq!(guard[0].title, "One Piece FR");
+        assert_eq!(guard[0].url, "https://example.com/fr");
+    }
+}

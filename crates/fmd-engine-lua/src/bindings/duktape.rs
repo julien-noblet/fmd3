@@ -35,3 +35,34 @@ pub fn register_duktape(lua: &Lua) -> LuaResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_duktape_exec_js_and_limits() {
+        let lua = Lua::new();
+        let package: Table = lua.globals().get("package").unwrap();
+        let _ = package.get::<Table>("loaded").unwrap();
+        register_duktape(&lua).unwrap();
+
+        let (sum, via_require, err_syntax, err_loop): (String, String, String, String) = lua
+            .load(
+                r#"
+                local d = require('duktape')
+                return duktape.ExecJS("'a' + 'b' + (2 + 3)"),
+                       d.ExecJS("6 * 7"),
+                       d.ExecJS("function("),
+                       d.ExecJS("while (true) {}")
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(sum, "ab5");
+        assert_eq!(via_require, "42");
+        assert!(err_syntax.starts_with("Error:"));
+        assert!(err_loop.starts_with("Error:"));
+    }
+}

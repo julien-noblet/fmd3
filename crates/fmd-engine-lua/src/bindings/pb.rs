@@ -28,3 +28,61 @@ pub fn register_pb(lua: &Lua) -> LuaResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pb_module_registered_and_loadfile_disabled() {
+        let lua = Lua::new();
+        register_pb(&lua).unwrap();
+
+        let (loadfile_is_nil, hex_ok, roundtrip_ok): (bool, bool, bool) = lua
+            .load(
+                r#"
+                local pb = require('pb')
+                local raw = pb.fromhex('08 96 01')
+                local hex = pb.tohex(raw)
+                return pb.loadfile == nil, hex == '08 96 01', #raw == 3
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert!(loadfile_is_nil);
+        assert!(hex_ok);
+        assert!(roundtrip_ok);
+    }
+
+    #[test]
+    fn test_pb_encode_decode_with_protoc_schema() {
+        let lua = Lua::new();
+        register_pb(&lua).unwrap();
+
+        let (name, id): (String, i64) = lua
+            .load(
+                r#"
+                package.path = 'lua/?.lua;../../lua/?.lua;' .. package.path
+                local protoc = require('utils.protoc')
+                local pb = require('pb')
+                protoc:load([[
+                    syntax = "proto2";
+                    message Manga {
+                        required string name = 1;
+                        optional int32 id = 2;
+                    }
+                ]])
+                local encoded = pb.encode('Manga', { name = 'One Piece', id = 1180 })
+                local decoded = pb.decode('Manga', encoded)
+                pb.clear()
+                return decoded.name, decoded.id
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(name, "One Piece");
+        assert_eq!(id, 1180);
+    }
+}

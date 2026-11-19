@@ -1,4 +1,5 @@
 use base64::prelude::*;
+use md5::{Digest, Md5};
 use mlua::{Lua, Result as LuaResult, Table};
 
 pub fn register_crypto(lua: &Lua) -> LuaResult<()> {
@@ -22,7 +23,11 @@ pub fn register_crypto(lua: &Lua) -> LuaResult<()> {
     })?;
 
     // MD5
-    let md5_fn = lua.create_function(|_, s: String| Ok(format!("{:x}", md5_hash(s.as_bytes()))))?;
+    let md5_fn = lua.create_function(|_, s: mlua::String| {
+        let mut hasher = Md5::new();
+        hasher.update(s.as_bytes());
+        Ok(hex::encode(hasher.finalize()))
+    })?;
 
     // HexToStr (binary bytes from hex string)
     let hex_to_str = lua.create_function(|lua, hex: String| {
@@ -70,11 +75,68 @@ pub fn register_crypto(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-fn md5_hash(data: &[u8]) -> u128 {
-    // Basic hash representation for compatibility
-    let mut hash = 0u128;
-    for &b in data {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u128);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_lua_with_crypto() -> Lua {
+        let lua = Lua::new();
+        register_crypto(&lua).unwrap();
+        lua
     }
-    hash
+
+    #[test]
+    fn test_md5_rfc1321_vectors() {
+        let lua = setup_lua_with_crypto();
+        let empty: String = lua
+            .load("return require('fmd.crypto').MD5('')")
+            .eval()
+            .unwrap();
+        assert_eq!(empty, "d41d8cd98f00b204e9800998ecf8427e");
+
+        let abc: String = lua
+            .load("return require('crypto').MD5('abc')")
+            .eval()
+            .unwrap();
+        assert_eq!(abc, "900150983cd24fb0d6963f7d28e17f72");
+
+        let msg: String = lua
+            .load("return require('fmd.crypto').MD5('message digest')")
+            .eval()
+            .unwrap();
+        assert_eq!(msg, "f96b697d7cb7938d525a2f31aaf161d0");
+    }
+
+    #[test]
+    fn test_base64_and_hex_helpers() {
+        let lua = setup_lua_with_crypto();
+        let encoded: String = lua
+            .load("return require('fmd.crypto').EncodeBase64('hello fmd3')")
+            .eval()
+            .unwrap();
+        assert_eq!(encoded, "aGVsbG8gZm1kMw==");
+
+        let decoded: String = lua
+            .load("return require('fmd.crypto').DecodeBase64('aGVs\\n bG8g Zm1kMw==')")
+            .eval()
+            .unwrap();
+        assert_eq!(decoded, "hello fmd3");
+
+        let invalid: mlua::Result<mlua::Value> = lua
+            .load("return require('fmd.crypto').DecodeBase64('not!valid!base64')")
+            .eval();
+        assert!(invalid.is_err());
+
+        let hex_roundtrip: bool = lua
+            .load(
+                r#"
+                local c = require('crypto')
+                local bin = c.HexToStr('00 ff 41 42')
+                return #bin == 4 and c.StrToHex(bin) == '00ff4142'
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(hex_roundtrip);
+    }
 }

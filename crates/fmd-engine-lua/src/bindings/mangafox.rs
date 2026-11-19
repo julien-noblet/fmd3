@@ -24,3 +24,29 @@ pub fn register_mangafox(lua: &Lua) -> LuaResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_mangafox_stubs() {
+        let lua = Lua::new();
+        register_mangafox(&lua).unwrap();
+
+        let (tmpl, removed): (i64, bool) = lua
+            .load(
+                r#"
+                local mf = require('fmd.mangafoxwatermark')
+                local mf2 = require('mangafoxwatermark')
+                assert(mf == mf2)
+                return mf.LoadTemplate('tpl.dat'), mf.RemoveWatermark('img.jpg', true)
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(tmpl, 1);
+        assert!(removed);
+    }
+}
