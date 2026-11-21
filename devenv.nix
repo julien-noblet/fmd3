@@ -85,12 +85,14 @@
     test-integration.exec = ''
       set -euo pipefail
       export FMD_TEST_POSTGRES_URL="$FMD_DATABASE_URL"
-      cargo test -p fmd-core test_postgres_backend_if_configured -- --nocapture
+      cargo test -p fmd-core --test postgres_integration -- --ignored --nocapture
+      cargo test -p fmd-cli --test nats_worker_integration -- --ignored --nocapture
     '';
   };
 
   enterTest = ''
     export FMD_TEST_POSTGRES_URL="$FMD_DATABASE_URL"
     check
+    test-integration
   '';
 }
