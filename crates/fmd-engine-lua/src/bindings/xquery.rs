@@ -922,3 +922,154 @@ pub fn register_xquery(lua: &Lua) -> LuaResult<()> {
     lua.globals().set("CreateTXQuery", create_txquery)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bindings::strings::create_string_list_table;
+
+    const SAMPLE_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<body>
+    <div class="manga-card" id="main">
+        <h1 class="title">Solo Leveling</h1>
+        <img class="cover" src="https://example.com/cover.jpg" />
+        <ul class="chapters">
+            <li><a href="/ch/1" title="Chapter 1 Title">Ch 1</a></li>
+            <li><a href="/ch/2">Ch 2</a></li>
+        </ul>
+    </div>
+    <script id="payload">{"manga":{"title":"Embedded Manga"},"items":[{"name":"A"},{"name":"B"}]}</script>
+</body>
+</html>"#;
+
+    #[test]
+    fn test_xpath_and_css_fallback_evaluators() {
+        assert_eq!(
+            eval_xpath_string(SAMPLE_HTML, "//h1[@class=\"title\"]"),
+            "Solo Leveling"
+        );
+        assert_eq!(
+            eval_xpath_string(SAMPLE_HTML, "//img/@src"),
+            "https://example.com/cover.jpg"
+        );
+        // Relative xpath fallback (prepends //)
+        assert_eq!(
+            eval_xpath_string(SAMPLE_HTML, "h1[@class=\"title\"]"),
+            "Solo Leveling"
+        );
+        // Missing element returns empty string
+        assert_eq!(eval_xpath_string(SAMPLE_HTML, "//nonexistent"), "");
+
+        // CSS fallback with contains(@class, ...)
+        let nodes = eval_xpath_nodes(
+            SAMPLE_HTML,
+            "//div[contains(@class, \"manga-card\")]//ul[@class=\"chapters\"]/li/a",
+        );
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            nodes[0].attributes.get("href").map(String::as_str),
+            Some("/ch/1")
+        );
+        assert_eq!(nodes[0].text, "Ch 1");
+        assert!(nodes[0].inner_html.contains("/ch/1"));
+
+        assert_eq!(
+            eval_xpath_count(SAMPLE_HTML, "//ul[@class=\"chapters\"]/li"),
+            2
+        );
+        assert_eq!(
+            eval_xpath_string_all(SAMPLE_HTML, "//ul[@class=\"chapters\"]/li/a"),
+            vec!["Ch 1".to_string(), "Ch 2".to_string()]
+        );
+
+        assert_eq!(
+            eval_xpath_href_all(SAMPLE_HTML, "//ul[@class=\"chapters\"]/li/a"),
+            vec![
+                ("/ch/1".to_string(), "Ch 1".to_string()),
+                ("/ch/2".to_string(), "Ch 2".to_string()),
+            ]
+        );
+        assert_eq!(
+            eval_xpath_href_title_all(SAMPLE_HTML, "//ul[@class=\"chapters\"]/li/a"),
+            vec![
+                ("/ch/1".to_string(), "Chapter 1 Title".to_string()),
+                ("/ch/2".to_string(), "Ch 2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_json_navigation_queries() {
+        let json = r#"{
+            "manga": { "title": "One Piece", "count": 1100, "active": true },
+            "chapters": [
+                { "name": "Ch 1", "url": "/1" },
+                { "name": "Ch 2", "url": "/2" }
+            ],
+            "items": ["zero-or-one", "second"]
+        }"#;
+
+        assert_eq!(eval_xpath_string(json, "json(*).manga.title"), "One Piece");
+        assert_eq!(eval_xpath_string(json, "json(*).manga.count"), "1100");
+        assert_eq!(eval_xpath_string(json, "json(*).manga.active"), "true");
+        assert_eq!(eval_xpath_string(json, "json(*).items[2]"), "second");
+        assert_eq!(
+            eval_xpath_string_all(json, "json(*).chapters().name"),
+            vec!["Ch 1".to_string(), "Ch 2".to_string()]
+        );
+
+        // Embedded JSON inside HTML <script>
+        assert_eq!(
+            eval_xpath_string(SAMPLE_HTML, "json(//script[@id=\"payload\"]).manga.title"),
+            "Embedded Manga"
+        );
+        assert_eq!(
+            eval_xpath_string_all(SAMPLE_HTML, "json(//script[@id=\"payload\"]).items().name"),
+            vec!["A".to_string(), "B".to_string()]
+        );
+
+        // Invalid JSON returns empty cleanly
+        assert_eq!(eval_xpath_string("{invalid json", "json(*).title"), "");
+        assert!(eval_xpath_nodes("{invalid json", "json(*).items()").is_empty());
+    }
+
+    #[test]
+    fn test_lua_txquery_api() {
+        let lua = Lua::new();
+        register_xquery(&lua).unwrap();
+        let (links_tbl, links) = create_string_list_table(&lua).unwrap();
+        let (names_tbl, names) = create_string_list_table(&lua).unwrap();
+        lua.globals().set("LINKS", links_tbl).unwrap();
+        lua.globals().set("NAMES", names_tbl).unwrap();
+        lua.globals().set("HTML", SAMPLE_HTML).unwrap();
+
+        let (title, count, first_href, iter_count, joined): (String, i64, String, i64, String) =
+            lua.load(
+                r#"
+                local x = CreateTXQuery(HTML)
+                local title = x.XPathString('//h1[@class="title"]')
+                local count = x.XPathCount('//ul[@class="chapters"]/li')
+                local nodes = x.XPath('//ul[@class="chapters"]/li/a')
+                local first_href = nodes.Get(1).GetAttribute('href')
+                local n = 0
+                for node in nodes.Get() do
+                    n = n + 1
+                end
+                x.XPathHREFTitleAll('//ul[@class="chapters"]/li/a', LINKS, NAMES)
+                local joined = x.XPathStringAll('//ul[@class="chapters"]/li/a')
+                return title, count, first_href, n, joined
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(title, "Solo Leveling");
+        assert_eq!(count, 2);
+        assert_eq!(first_href, "/ch/1");
+        assert_eq!(iter_count, 2);
+        assert_eq!(joined, "Ch 1, Ch 2");
+        assert_eq!(*links.lock().unwrap(), vec!["/ch/1", "/ch/2"]);
+        assert_eq!(*names.lock().unwrap(), vec!["Chapter 1 Title", "Ch 2"]);
+    }
+}

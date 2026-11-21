@@ -22,3 +22,29 @@ pub fn register_env(lua: &Lua) -> LuaResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_env_exposes_expected_fields() {
+        let lua = Lua::new();
+        register_env(&lua).unwrap();
+
+        let (exe, lua_dir, lang, version): (String, String, String, String) = lua
+            .load(
+                r#"
+                local e = require('fmd.env')
+                return e.ExeName, e.LuaDirectory, e.SelectedLanguage, e.Version
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(exe, "fmd");
+        assert_eq!(lua_dir, "lua");
+        assert_eq!(lang, "en");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    }
+}

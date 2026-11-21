@@ -74,12 +74,34 @@ pub fn render_app_html_with_base_path(base_path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn run_node_script(base_path: &str, harness_js: &str, label: &str) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("node")
+            .arg("-e")
+            .arg(harness_js)
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("node must be available in PATH to run fmd-ui JS tests");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(client_script::render(base_path).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{label} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn catalog_sync_cannot_be_cancelled_in_demo_or_cleared_on_failure() {
-        let Ok(mut child) = std::process::Command::new("node")
-            .arg("-e")
-            .arg(
-                r#"
+        run_node_script(
+            "",
+            r#"
 const vm = require('vm');
 let code = '';
 process.stdin.on('data', d => code += d);
@@ -141,34 +163,15 @@ process.stdin.on('end', async () => {
     }
 });
 "#,
-            )
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        else {
-            return;
-        };
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(client_script::render("").as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "Catalog sync cancellation regression failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            "Catalog sync cancellation regression",
         );
     }
 
     #[test]
     fn restored_demo_session_reenables_activity_and_expiry_checks() {
-        let Ok(mut child) = std::process::Command::new("node")
-            .arg("-e")
-            .arg(
-                r#"
+        run_node_script(
+            "",
+            r#"
 const vm = require('vm');
 let code = '';
 process.stdin.on('data', d => code += d);
@@ -267,25 +270,7 @@ process.stdin.on('end', async () => {
     }
 });
 "#,
-            )
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        else {
-            return;
-        };
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(client_script::render("").as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "Demo session restoration failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            "Demo session restoration",
         );
     }
 
@@ -326,11 +311,9 @@ process.stdin.on('end', async () => {
         assert!(html.contains("setLocale"));
         assert!(html.contains("data-i18n=\"nav.favorites\""));
 
-        // Validate JavaScript syntax and execution using node if node is present
-        if let Ok(mut child) = std::process::Command::new("node")
-            .arg("-e")
-            .arg(
-                r#"
+        run_node_script(
+            "/reader",
+            r#"
 const vm = require('vm');
 let code = '';
 process.stdin.on('data', d => code += d);
@@ -368,25 +351,8 @@ process.stdin.on('end', async () => {
     }
 });
 "#,
-            )
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(client_script::render("/reader").as_bytes())
-                    .unwrap();
-            }
-            let output = child.wait_with_output().unwrap();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                output.status.success(),
-                "CLIENT_SCRIPT has JavaScript execution/runtime errors:\n{}",
-                stderr
-            );
-        }
+            "CLIENT_SCRIPT execution",
+        );
     }
 
     #[test]
@@ -451,10 +417,9 @@ process.stdin.on('end', async () => {
             }
         }
 
-        if let Ok(mut child) = std::process::Command::new("node")
-            .arg("-e")
-            .arg(
-                r#"
+        run_node_script(
+            "",
+            r#"
 const vm = require('vm');
 let code = '';
 process.stdin.on('data', d => code += d);
@@ -491,30 +456,15 @@ process.stdin.on('end', () => {
     process.exit(0);
 });
 "#,
-            )
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(script.as_bytes()).unwrap();
-            }
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "XSS sanitizer JS test failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+            "XSS sanitizer JS test",
+        );
     }
 
     #[test]
     fn demo_settings_disables_interval_selects_and_supports_custom_env_values() {
-        let Ok(mut child) = std::process::Command::new("node")
-            .arg("-e")
-            .arg(
-                r#"
+        run_node_script(
+            "",
+            r#"
 const vm = require('vm');
 let data = '';
 process.stdin.on('data', chunk => data += chunk);
@@ -594,25 +544,7 @@ process.stdin.on('end', () => {
     })().catch(err => { console.error(err); process.exitCode = 1; });
 });
 "#,
-            )
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        else {
-            return;
-        };
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(client_script::render("").as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "Demo settings UI test failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            "Demo settings UI test",
         );
     }
 }

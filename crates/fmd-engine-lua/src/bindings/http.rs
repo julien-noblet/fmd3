@@ -221,3 +221,120 @@ pub fn register_http(lua: &Lua, client: HttpClient) -> LuaResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{body_string, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_lua_http_get_post_headers_reset_and_document() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .and(header("X-Test", "abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello-get"))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/not-found"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/submit"))
+            .and(header("content-type", "application/json"))
+            .and(body_string(r#"{"k":1}"#))
+            .respond_with(ResponseTemplate::new(201).set_body_string("created"))
+            .mount(&server)
+            .await;
+
+        let lua = Lua::new();
+        let client = HttpClient::new().unwrap();
+        register_http(&lua, client).unwrap();
+
+        let base = server.uri();
+        let (
+            empty_ok,
+            get_ok,
+            code_ok,
+            doc_str,
+            doc_concat,
+            doc_override,
+            not_found_ok,
+            code_404,
+            post_ok,
+            post_code,
+            post_body,
+        ): (
+            bool,
+            bool,
+            i64,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            bool,
+            i64,
+            String,
+        ) = lua
+            .load(format!(
+                r#"
+                local empty_ok = HTTP.GET('')
+                HTTP.Headers.Values['X-Test'] = 'abc'
+                local get_ok = HTTP.GET('{base}/ok')
+                local code_ok = HTTP.ResultCode
+                local doc_str = HTTP.Document.ToString()
+                local doc_concat = HTTP.Document .. '!'
+                HTTP.Document.WriteString('override')
+                local doc_override = tostring(HTTP.Document)
+
+                HTTP.Reset()
+                local not_found_ok = HTTP.GET('{base}/not-found')
+                local code_404 = HTTP.ResultCode
+
+                HTTP.MimeType = 'application/json'
+                local post_ok = HTTP.POST('{base}/submit', '{{"k":1}}')
+                local post_code = HTTP.ResultCode
+                local post_body = HTTP.Document.ToString()
+                return empty_ok, get_ok, code_ok, doc_str, doc_concat, doc_override,
+                       not_found_ok, code_404, post_ok, post_code, post_body
+                "#
+            ))
+            .eval()
+            .unwrap();
+
+        assert!(!empty_ok);
+        assert!(get_ok);
+        assert_eq!(code_ok, 200);
+        assert_eq!(doc_str, "hello-get");
+        assert_eq!(doc_concat, "hello-get!");
+        assert_eq!(doc_override, "override");
+        assert!(!not_found_ok);
+        assert_eq!(code_404, 404);
+        assert!(post_ok);
+        assert_eq!(post_code, 201);
+        assert_eq!(post_body, "created");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_lua_http_public_only_blocks_loopback_with_error() {
+        let lua = Lua::new();
+        let client = HttpClient::new_public_only().unwrap();
+        register_http(&lua, client).unwrap();
+
+        let get_err: mlua::Result<bool> =
+            lua.load("return HTTP.GET('http://127.0.0.1:8080/')").eval();
+        assert!(get_err.is_err());
+
+        let post_err: mlua::Result<bool> = lua
+            .load("return HTTP.POST('http://127.0.0.1:8080/', 'a=1')")
+            .eval();
+        assert!(post_err.is_err());
+    }
+}

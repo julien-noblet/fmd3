@@ -153,4 +153,119 @@ mod tests {
 
         let _ = std::fs::remove_file(&wasm_file);
     }
+
+    #[test]
+    fn test_wasm_invalid_bytes_rejected() {
+        let engine = WasmEngine::new().expect("WasmEngine init");
+        assert!(engine.load_module(b"not-valid-wasm").is_err());
+    }
+
+    #[test]
+    fn test_wasm_fuel_exhaustion_aborts_infinite_loop() {
+        let engine = WasmEngine::new().expect("WasmEngine init");
+        let wat = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "_fmd_meta") (result i64)
+            (loop $l
+              (br $l)
+            )
+            (i64.const 0)
+          )
+        )
+        "#;
+        let bytes = wat::parse_str(wat).unwrap();
+        let mut instance = engine.load_module(&bytes).unwrap();
+        let err = instance.get_metadata().unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("fuel") || !err.to_string().is_empty(),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_wasm_missing_exports_and_oob_memory_and_bad_json() {
+        let engine = WasmEngine::new().expect("WasmEngine init");
+
+        // Missing _fmd_meta and memory
+        let minimal = wat::parse_str("(module)").unwrap();
+        let mut inst_min = engine.load_module(&minimal).unwrap();
+        assert!(inst_min.get_metadata().is_err());
+        assert!(inst_min.read_bytes(0, 1).is_err());
+        assert!(inst_min.write_bytes(0, b"a").is_err());
+        assert!(inst_min.process_image(b"x", "a.png", "png").is_err());
+
+        // Missing JSON func, OOB ptr return, and malformed JSON
+        let bad_mem_and_json = r#"
+        (module
+          (memory (export "memory") 1)
+          (data (i32.const 100) "{not-json")
+          (func (export "_fmd_meta") (result i64)
+            (i64.or
+              (i64.shl (i64.const 70000) (i64.const 32))
+              (i64.const 16)
+            )
+          )
+          (func (export "_fmd_bad_json") (param i32 i32) (result i64)
+            (i64.or
+              (i64.shl (i64.const 100) (i64.const 32))
+              (i64.const 9)
+            )
+          )
+        )
+        "#;
+        let mut inst_bad = engine
+            .load_module(&wat::parse_str(bad_mem_and_json).unwrap())
+            .unwrap();
+        assert!(inst_bad.get_metadata().is_err());
+        assert!(inst_bad
+            .call_json::<WasmSearchQuery, WasmSearchResult>(
+                "_fmd_missing",
+                &WasmSearchQuery { query: "q".into() },
+            )
+            .is_err());
+        assert!(inst_bad
+            .call_json::<WasmSearchQuery, WasmSearchResult>(
+                "_fmd_bad_json",
+                &WasmSearchQuery { query: "q".into() },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn test_wasm_custom_allocator_and_safe_host_log() {
+        let engine = WasmEngine::new().expect("WasmEngine init");
+        let wat = r#"
+        (module
+          (import "env" "host_log" (func $host_log (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 512) "hello-log")
+          (func (export "_fmd_alloc") (param $size i32) (result i32)
+            (i32.const 2048)
+          )
+          (func (export "_fmd_process_image") (param $ptr i32) (param $len i32) (result i64)
+            (call $host_log (i32.const 0) (i32.const 512) (i32.const 9))
+            (call $host_log (i32.const 1) (i32.const -1) (i32.const 4))
+            (call $host_log (i32.const 2) (i32.const 70000) (i32.const 10))
+            (i64.or
+              (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32))
+              (i64.extend_i32_u (local.get $len))
+            )
+          )
+        )
+        "#;
+        let mut instance = engine.load_module(&wat::parse_str(wat).unwrap()).unwrap();
+        assert_eq!(instance.alloc(16).unwrap(), 2048);
+        let out = instance
+            .process_image(b"PNG_CUSTOM_ALLOC", "p.png", "png")
+            .unwrap();
+        assert_eq!(out, b"PNG_CUSTOM_ALLOC");
+        // Confirm input was written at offset 2048
+        assert_eq!(
+            instance
+                .read_bytes(2048, b"PNG_CUSTOM_ALLOC".len())
+                .unwrap(),
+            b"PNG_CUSTOM_ALLOC"
+        );
+    }
 }

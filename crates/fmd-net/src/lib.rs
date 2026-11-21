@@ -27,6 +27,7 @@ pub type Result<T> = std::result::Result<T, NetError>;
 pub struct HttpClient {
     client: Client,
     public_only: bool,
+    flaresolverr_url: Option<String>,
 }
 
 fn public_url_allowed(url: &url::Url) -> bool {
@@ -83,6 +84,11 @@ impl reqwest::dns::Resolve for PublicDnsResolver {
 }
 
 impl HttpClient {
+    pub fn with_flaresolverr_url(mut self, url: Option<String>) -> Self {
+        self.flaresolverr_url = url;
+        self
+    }
+
     pub fn is_public_only(&self) -> bool {
         self.public_only
     }
@@ -140,6 +146,7 @@ impl HttpClient {
         Ok(Self {
             client,
             public_only,
+            flaresolverr_url: None,
         })
     }
 
@@ -180,7 +187,11 @@ impl HttpClient {
 
         // Fallback to FlareSolverr if Cloudflare block and configured
         if !self.public_only && (status == 403 || status == 503) {
-            if let Ok(fs_url) = std::env::var("FLARESOLVERR_URL") {
+            let fs_url = self
+                .flaresolverr_url
+                .clone()
+                .or_else(|| std::env::var("FLARESOLVERR_URL").ok());
+            if let Some(fs_url) = fs_url {
                 if !fs_url.is_empty() {
                     let fc = FlareSolverrClient::new(fs_url);
                     if let Ok(html) = fc.resolve_html(url).await {
@@ -407,5 +418,234 @@ impl FlareSolverrClient {
         }
 
         Err(NetError::FlareSolverr(resp.message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use wiremock::matchers::{body_string, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_flaresolverr_client_success_error_and_missing_solution() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": "",
+                "solution": { "response": "<html>solved</html>", "status": 200 }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/err"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "error",
+                "message": "Challenge failed",
+                "solution": null
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": "missing solution",
+                "solution": null
+            })))
+            .mount(&server)
+            .await;
+
+        let ok_client = FlareSolverrClient::new(format!("{}/ok", server.uri()));
+        assert_eq!(
+            ok_client
+                .resolve_html("https://target.example")
+                .await
+                .unwrap(),
+            "<html>solved</html>"
+        );
+
+        let err_client = FlareSolverrClient::new(format!("{}/err", server.uri()));
+        let err = err_client
+            .resolve_html("https://target.example")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Challenge failed"));
+
+        let empty_client = FlareSolverrClient::new(format!("{}/empty", server.uri()));
+        let empty_err = empty_client
+            .resolve_html("https://target.example")
+            .await
+            .unwrap_err();
+        assert!(empty_err.to_string().contains("missing solution"));
+    }
+
+    #[tokio::test]
+    async fn test_http_client_headers_post_errors_and_flaresolverr_fallback() {
+        let origin = MockServer::start().await;
+        let flare = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/blocked-403"))
+            .and(header("X-Custom", "val1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("cf block"))
+            .mount(&origin)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/blocked-503"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("cf challenge"))
+            .mount(&origin)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/not-found"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("nope"))
+            .mount(&origin)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/post-default"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(body_string("a=1&b=2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("form-ok"))
+            .mount(&origin)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/post-json"))
+            .and(header("content-type", "application/json"))
+            .and(header("X-Auth", "tok"))
+            .and(body_string(r#"{"x":1}"#))
+            .respond_with(ResponseTemplate::new(201).set_body_string("json-ok"))
+            .mount(&origin)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": "",
+                "solution": { "response": "<html>bypassed</html>", "status": 200 }
+            })))
+            .mount(&flare)
+            .await;
+
+        let client = HttpClient::new()
+            .unwrap()
+            .with_flaresolverr_url(Some(format!("{}/v1", flare.uri())));
+        let mut hdrs = HashMap::new();
+        hdrs.insert("X-Custom".to_string(), "val1".to_string());
+
+        let (st403, body403) = client
+            .get_text_with_headers(&format!("{}/blocked-403", origin.uri()), &hdrs)
+            .await
+            .unwrap();
+        assert_eq!(st403, 200);
+        assert_eq!(body403, "<html>bypassed</html>");
+
+        let (st503, body503) = client
+            .get_text_with_headers(&format!("{}/blocked-503", origin.uri()), &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(st503, 200);
+        assert_eq!(body503, "<html>bypassed</html>");
+
+        let bytes_err = client
+            .get_bytes_with_headers(&format!("{}/not-found", origin.uri()), &HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(bytes_err.to_string().contains("404"));
+
+        let (p1_st, p1_body) = client
+            .post_text_with_headers(
+                &format!("{}/post-default", origin.uri()),
+                "a=1&b=2",
+                None,
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(p1_st, 200);
+        assert_eq!(p1_body, "form-ok");
+
+        let mut json_hdrs = HashMap::new();
+        json_hdrs.insert("X-Auth".to_string(), "tok".to_string());
+        let (p2_st, p2_body) = client
+            .post_text_with_headers(
+                &format!("{}/post-json", origin.uri()),
+                r#"{"x":1}"#,
+                Some("application/json"),
+                &json_hdrs,
+            )
+            .await
+            .unwrap();
+        assert_eq!(p2_st, 201);
+        assert_eq!(p2_body, "json-ok");
+
+        // public_only client rejects loopback and never triggers FlareSolverr
+        let public_client = HttpClient::new_public_only()
+            .unwrap()
+            .with_flaresolverr_url(Some(format!("{}/v1", flare.uri())));
+        assert!(public_client
+            .get_text_with_headers(&format!("{}/blocked-403", origin.uri()), &hdrs)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn test_is_public_url_filtering() {
+        assert!(!is_public_url("https://user:pass@example.com/"));
+        assert!(!is_public_url("https://user@example.com/"));
+        assert!(!is_public_url("http://service.local/api"));
+        assert!(!is_public_url("http://db.internal/"));
+        assert!(!is_public_url("http://printer.lan/"));
+        assert!(!is_public_url("ftp://example.com/file"));
+        assert!(!is_public_url("javascript:alert(1)"));
+        assert!(is_public_url("http://example.com/path"));
+        assert!(is_public_url("https://example.com/path"));
+    }
+
+    #[tokio::test]
+    async fn test_public_redirect_policy_rejects_over_10_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            for _ in 0..12 {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://public.test:{}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    addr.port()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("public.test", addr)
+            .redirect(public_redirect_policy())
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(format!("http://public.test:{}/start", addr.port()))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_redirect() || err.to_string().contains("redirect"));
+        server.abort();
     }
 }

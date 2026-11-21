@@ -142,22 +142,27 @@ impl DomainThrottler {
 // BOOTSTRAP INITIAL ADMIN FROM ENV / SECRET
 // ==========================================
 
-pub async fn bootstrap_admin_from_env_or_secret(db: &Database) -> anyhow::Result<()> {
+pub async fn bootstrap_admin_from_config(
+    db: &Database,
+    user: Option<&str>,
+    password: Option<&str>,
+    password_file: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let count = db.count_users().await?;
     if count > 0 {
         return Ok(());
     }
 
-    let user_opt = std::env::var("FMD_ADMIN_USER").ok();
-    let pass_opt = if let Ok(p) = std::env::var("FMD_ADMIN_PASSWORD") {
-        Some(p)
-    } else if let Ok(file_path) = std::env::var("FMD_ADMIN_PASSWORD_FILE") {
-        match std::fs::read_to_string(&file_path) {
+    let pass_opt = if let Some(p) = password {
+        Some(p.to_string())
+    } else if let Some(file_path) = password_file {
+        match std::fs::read_to_string(file_path) {
             Ok(content) => Some(content.trim().to_string()),
             Err(e) => {
                 warn!(
                     "Failed to read FMD_ADMIN_PASSWORD_FILE from {}: {}",
-                    file_path, e
+                    file_path.display(),
+                    e
                 );
                 None
             }
@@ -166,7 +171,7 @@ pub async fn bootstrap_admin_from_env_or_secret(db: &Database) -> anyhow::Result
         None
     };
 
-    if let (Some(username), Some(password)) = (user_opt, pass_opt) {
+    if let (Some(username), Some(password)) = (user, pass_opt) {
         let username = username.trim();
         let password = password.trim();
         if !username.is_empty() && !password.is_empty() {
@@ -185,6 +190,21 @@ pub async fn bootstrap_admin_from_env_or_secret(db: &Database) -> anyhow::Result
     }
 
     Ok(())
+}
+
+pub async fn bootstrap_admin_from_env_or_secret(db: &Database) -> anyhow::Result<()> {
+    let user_opt = std::env::var("FMD_ADMIN_USER").ok();
+    let pass_opt = std::env::var("FMD_ADMIN_PASSWORD").ok();
+    let file_opt = std::env::var("FMD_ADMIN_PASSWORD_FILE")
+        .ok()
+        .map(std::path::PathBuf::from);
+    bootstrap_admin_from_config(
+        db,
+        user_opt.as_deref(),
+        pass_opt.as_deref(),
+        file_opt.as_deref(),
+    )
+    .await
 }
 
 // ==========================================
@@ -745,4 +765,166 @@ pub async fn admin_clear_manga_cache(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({ "status": "cleared" })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    #[test]
+    fn test_extract_client_ip() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(extract_client_ip(&headers), "127.0.0.1");
+
+        headers.insert("x-real-ip", HeaderValue::from_static("  198.51.100.7  "));
+        assert_eq!(extract_client_ip(&headers), "198.51.100.7");
+
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static(" 203.0.113.5 , 10.0.0.1 "),
+        );
+        assert_eq!(extract_client_ip(&headers), "203.0.113.5");
+
+        let mut empty_headers = HeaderMap::new();
+        empty_headers.insert("x-forwarded-for", HeaderValue::from_static("   "));
+        empty_headers.insert("x-real-ip", HeaderValue::from_static("  "));
+        assert_eq!(extract_client_ip(&empty_headers), "127.0.0.1");
+    }
+
+    #[test]
+    fn test_is_request_secure() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_request_secure(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        assert!(!is_request_secure(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(is_request_secure(&headers));
+
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("HTTPS"));
+        assert!(is_request_secure(&headers));
+    }
+
+    #[tokio::test]
+    async fn test_domain_throttler_delays_same_module_only() {
+        let throttler = DomainThrottler::new();
+
+        // min_delay_ms = 0 returns immediately
+        let t0 = Instant::now();
+        throttler.throttle("mod_zero", 0).await;
+        throttler.throttle("mod_zero", 0).await;
+        assert!(t0.elapsed() < Duration::from_millis(20));
+
+        // Same module enforces delay on consecutive requests
+        let start = Instant::now();
+        throttler.throttle("mod_a", 50).await;
+        throttler.throttle("mod_a", 50).await;
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "expected >= 40ms delay, got {:?}",
+            start.elapsed()
+        );
+
+        // Different module does not wait on mod_a
+        let start_b = Instant::now();
+        throttler.throttle("mod_b", 50).await;
+        assert!(start_b.elapsed() < Duration::from_millis(25));
+    }
+
+    #[test]
+    fn test_extract_token_from_headers_and_parts_priority() {
+        let req_both = Request::builder()
+            .uri("/api/settings?foo=1&token=query_tok")
+            .header(COOKIE, "other=x; fmd_session=cookie_tok; theme=dark")
+            .header(AUTHORIZATION, "Bearer bearer_tok")
+            .body(())
+            .unwrap();
+        let (parts_both, _) = req_both.into_parts();
+        assert_eq!(
+            extract_token_from_headers(&parts_both.headers).as_deref(),
+            Some("bearer_tok")
+        );
+        assert_eq!(
+            extract_token_from_parts(&parts_both).as_deref(),
+            Some("bearer_tok")
+        );
+
+        let req_cookie = Request::builder()
+            .uri("/api/settings?token=query_tok")
+            .header(COOKIE, "a=1; fmd_session= cookie_tok ; b=2")
+            .body(())
+            .unwrap();
+        let (parts_cookie, _) = req_cookie.into_parts();
+        assert_eq!(
+            extract_token_from_parts(&parts_cookie).as_deref(),
+            Some("cookie_tok")
+        );
+
+        let req_query = Request::builder()
+            .uri("/api/ws?foo=1&token=q_tok")
+            .body(())
+            .unwrap();
+        let (parts_query, _) = req_query.into_parts();
+        assert_eq!(
+            extract_token_from_parts(&parts_query).as_deref(),
+            Some("q_tok")
+        );
+
+        let req_empty = Request::builder()
+            .uri("/api/ws?token=")
+            .header(AUTHORIZATION, "Bearer   ")
+            .header(COOKIE, "fmd_session=   ")
+            .body(())
+            .unwrap();
+        let (parts_empty, _) = req_empty.into_parts();
+        assert_eq!(extract_token_from_parts(&parts_empty), None);
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_from_config_scenarios() {
+        // Missing password file / empty creds -> skips gracefully
+        let db1 = Database::new_in_memory().await.unwrap();
+        let missing_path = std::path::Path::new("/tmp/definitely-missing-fmd3-secret-file");
+        bootstrap_admin_from_config(&db1, Some("admin"), None, Some(missing_path))
+            .await
+            .unwrap();
+        assert_eq!(db1.count_users().await.unwrap(), 0);
+
+        bootstrap_admin_from_config(&db1, Some("   "), Some("secret123"), None)
+            .await
+            .unwrap();
+        assert_eq!(db1.count_users().await.unwrap(), 0);
+
+        // Password file with trailing newline -> creates admin and is idempotent
+        let dir = tempfile::tempdir().unwrap();
+        let pass_file = dir.path().join("admin-pass.txt");
+        std::fs::write(&pass_file, "  FileSecret123! \n").unwrap();
+
+        bootstrap_admin_from_config(&db1, Some(" file_admin "), None, Some(&pass_file))
+            .await
+            .unwrap();
+        assert_eq!(db1.count_users().await.unwrap(), 1);
+        let admin = db1
+            .get_user_by_username("file_admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(auth::verify_password(
+            "FileSecret123!",
+            admin.password_hash.as_deref().unwrap()
+        ));
+
+        // Second call is idempotent even with different credentials
+        bootstrap_admin_from_config(&db1, Some("other_admin"), Some("OtherPass!"), None)
+            .await
+            .unwrap();
+        assert_eq!(db1.count_users().await.unwrap(), 1);
+        assert!(db1
+            .get_user_by_username("other_admin")
+            .await
+            .unwrap()
+            .is_none());
+    }
 }

@@ -2907,14 +2907,12 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_download_failure_retry_and_permanent_failure() {
-        let db = Database::new(":memory:").await.unwrap();
+    fn test_app_state(db: Database) -> AppState {
         let engine = Arc::new(Mutex::new(LuaModuleEngine::new().unwrap()));
         let (ws_sender, _) = broadcast::channel(10);
         let sync_manager = Arc::new(CatalogSyncManager::new());
-        let state = AppState {
-            db: db.clone(),
+        AppState {
+            db,
             shared_cache: None,
             demo_shutdown: None,
             engine,
@@ -2928,7 +2926,13 @@ mod tests {
             internal_worker_token: "test_internal_token".to_string(),
             env_overrides: fmd_core::RuntimeEnvOverrides::default(),
             sfw_mode: false,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_failure_retry_and_permanent_failure() {
+        let db = Database::new(":memory:").await.unwrap();
+        let state = test_app_state(db.clone());
 
         let dl_id = "test-dl-1";
         db.queue_download(
@@ -3093,25 +3097,7 @@ mod tests {
     #[tokio::test]
     async fn test_queue_multi_source_downloads() {
         let db = Database::new(":memory:").await.unwrap();
-        let engine = Arc::new(Mutex::new(LuaModuleEngine::new().unwrap()));
-        let (ws_sender, _) = broadcast::channel(10);
-        let sync_manager = Arc::new(CatalogSyncManager::new());
-        let state = AppState {
-            db: db.clone(),
-            shared_cache: None,
-            demo_shutdown: None,
-            engine,
-            modules: Arc::new(vec![]),
-            ws_sender,
-            catalog_ws_sender: None,
-            sync_manager,
-            nats_context: None,
-            throttler: auth::DomainThrottler::new(),
-            login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
-            internal_worker_token: "test_internal_token".to_string(),
-            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
-            sfw_mode: false,
-        };
+        let state = test_app_state(db.clone());
 
         let req = QueueDownloadRequest {
             module_id: "mangaplus".to_string(),
@@ -3178,38 +3164,22 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_from_env_and_auth_status() {
         let db = Database::new(":memory:").await.unwrap();
-        let engine = Arc::new(Mutex::new(LuaModuleEngine::new().unwrap()));
-        let (ws_sender, _) = broadcast::channel(10);
-        let sync_manager = Arc::new(CatalogSyncManager::new());
-        let state = AppState {
-            db: db.clone(),
-            shared_cache: None,
-            demo_shutdown: None,
-            engine,
-            modules: Arc::new(vec![]),
-            ws_sender,
-            catalog_ws_sender: None,
-            sync_manager,
-            nats_context: None,
-            throttler: auth::DomainThrottler::new(),
-            login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
-            internal_worker_token: "test_internal_token".to_string(),
-            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
-            sfw_mode: false,
-        };
+        let state = test_app_state(db);
 
         // Initially no users -> setup_needed must be true
         let status1 = auth::get_auth_status(State(state.clone()), auth::MaybeAuth(None)).await;
         assert!(status1.setup_needed);
         assert!(!status1.authenticated);
 
-        // Simulate environment variables injected by Kubernetes Secret
-        std::env::set_var("FMD_ADMIN_USER", "k8s_admin");
-        std::env::set_var("FMD_ADMIN_PASSWORD", "SuperSecurePassword123!");
-
-        auth::bootstrap_admin_from_env_or_secret(&state.db)
-            .await
-            .unwrap();
+        // Simulate environment config injected by Kubernetes Secret without mutating process env
+        auth::bootstrap_admin_from_config(
+            &state.db,
+            Some("k8s_admin"),
+            Some("SuperSecurePassword123!"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(state.db.count_users().await.unwrap(), 1);
 
         // After bootstrap -> setup_needed must be false (wizard bypassed)
@@ -3247,10 +3217,6 @@ mod tests {
         let logout_cookie = logout_headers.get("set-cookie").unwrap().to_str().unwrap();
         assert!(logout_cookie.contains("fmd_session=;"));
         assert!(logout_cookie.contains("Max-Age=0"));
-
-        // Clean up env vars
-        std::env::remove_var("FMD_ADMIN_USER");
-        std::env::remove_var("FMD_ADMIN_PASSWORD");
     }
 
     #[tokio::test]
@@ -3349,26 +3315,11 @@ mod tests {
             .unwrap();
         let token = db.create_session(&admin.id, None, None, 1).await.unwrap();
 
-        let (ws_sender, _) = broadcast::channel(10);
-        let state = AppState {
-            db: db.clone(),
-            shared_cache: None,
-            demo_shutdown: None,
-            engine: Arc::new(Mutex::new(LuaModuleEngine::new().unwrap())),
-            modules: Arc::new(vec![]),
-            ws_sender,
-            catalog_ws_sender: None,
-            sync_manager: Arc::new(CatalogSyncManager::new()),
-            nats_context: None,
-            throttler: auth::DomainThrottler::new(),
-            login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
-            internal_worker_token: "test_internal_token".to_string(),
-            env_overrides: fmd_core::RuntimeEnvOverrides {
-                min_delay_ms: Some(2500),
-                check_interval_hours: Some(6),
-                catalog_resync_days: Some(14),
-            },
-            sfw_mode: false,
+        let mut state = test_app_state(db.clone());
+        state.env_overrides = fmd_core::RuntimeEnvOverrides {
+            min_delay_ms: Some(2500),
+            check_interval_hours: Some(6),
+            catalog_resync_days: Some(14),
         };
 
         assert_eq!(state.effective_min_delay_ms(100), 2500);
@@ -3469,23 +3420,9 @@ mod tests {
         .await
         .unwrap();
 
-        let (ws_sender, _) = broadcast::channel(10);
-        let state = AppState {
-            db,
-            shared_cache: None,
-            demo_shutdown: None,
-            engine: Arc::new(Mutex::new(LuaModuleEngine::new().unwrap())),
-            modules: Arc::new(filtered_modules),
-            ws_sender,
-            catalog_ws_sender: None,
-            sync_manager: Arc::new(CatalogSyncManager::new()),
-            nats_context: None,
-            throttler: auth::DomainThrottler::new(),
-            login_rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
-            internal_worker_token: "test_internal_token".to_string(),
-            env_overrides: fmd_core::RuntimeEnvOverrides::default(),
-            sfw_mode: true,
-        };
+        let mut state = test_app_state(db);
+        state.modules = Arc::new(filtered_modules);
+        state.sfw_mode = true;
         let app = build_router(state, "");
 
         // 1. Blocked module is rejected by /api/manga/fetch

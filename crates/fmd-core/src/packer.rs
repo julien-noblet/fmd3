@@ -499,4 +499,125 @@ mod tests {
         assert!(xml.contains("<Manga>YesAndRightToLeft</Manga>"));
         assert!(xml.contains("<PageCount>20</PageCount>"));
     }
+
+    fn make_png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([20, 40, 60, 255]));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn test_pack_to_pdf_and_corrupt_image_tolerance() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_pdf = dir.path().join("nested/chapter.pdf");
+        let png = make_png_bytes(4, 4);
+
+        let mut packer = ChapterPacker::new("Berserk".into(), "Ch 1".into());
+        packer.add_page("001.png".into(), png.clone());
+        packer.add_page("002_corrupt.png".into(), b"not-an-image".to_vec());
+        packer.add_page("003.png".into(), png);
+
+        packer.pack_to(PackagingFormat::Pdf, &out_pdf).unwrap();
+        let bytes = std::fs::read(&out_pdf).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/Count 2"));
+    }
+
+    #[test]
+    fn test_pack_to_epub_structure_and_xml_escaping() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let out_epub = dir.path().join("book.epub");
+        let png = make_png_bytes(2, 2);
+
+        let mut packer = ChapterPacker::new("A & B <Manga>".into(), "Ch \"1's\"".into());
+        packer.set_metadata(ChapterMetadata {
+            series: "A & B <Manga>".into(),
+            title: "Ch \"1's\"".into(),
+            number: Some("1".into()),
+            summary: None,
+            writer: Some("Oda & Co".into()),
+            genres: vec![],
+            web: None,
+            language_iso: Some("fr".into()),
+        });
+        packer.add_page("001.png".into(), png.clone());
+        packer.add_page("002.webp".into(), b"RIFF0000WEBP".to_vec());
+        packer.add_page("003.jpg".into(), png);
+
+        packer.pack_to(PackagingFormat::Epub, &out_epub).unwrap();
+        let file = std::fs::File::open(&out_epub).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+
+        // First entry MUST be uncompressed mimetype
+        {
+            let mut mimetype = zip.by_index(0).unwrap();
+            assert_eq!(mimetype.name().unwrap(), "mimetype");
+            assert_eq!(mimetype.compression(), zip::CompressionMethod::Stored);
+            let mut body = String::new();
+            mimetype.read_to_string(&mut body).unwrap();
+            assert_eq!(body, "application/epub+zip");
+        }
+
+        assert!(zip.by_name("META-INF/container.xml").is_ok());
+        assert!(zip.by_name("OEBPS/page_0001.xhtml").is_ok());
+        assert!(zip.by_name("OEBPS/images/001.png").is_ok());
+
+        let mut opf = String::new();
+        zip.by_name("OEBPS/content.opf")
+            .unwrap()
+            .read_to_string(&mut opf)
+            .unwrap();
+        assert!(opf.contains("A &amp; B &lt;Manga&gt;"));
+        assert!(opf.contains("Oda &amp; Co"));
+        assert!(opf.contains("media-type=\"image/png\""));
+        assert!(opf.contains("media-type=\"image/webp\""));
+        assert!(opf.contains("media-type=\"image/jpeg\""));
+    }
+
+    #[test]
+    fn test_pack_to_directory_and_cbz_and_path_edge_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("dir_chapter");
+        let out_cbz = dir.path().join("archive.zip");
+        let png = make_png_bytes(2, 2);
+
+        let mut packer = ChapterPacker::new("Dandadan".into(), "Ch & <1>".into());
+        packer.add_page("001.png".into(), png);
+        packer
+            .pack_to(PackagingFormat::Directory, &out_dir)
+            .unwrap();
+        assert!(out_dir.join("001.png").exists());
+        let xml = std::fs::read_to_string(out_dir.join("ComicInfo.xml")).unwrap();
+        assert!(xml.contains("<Title>Ch &amp; &lt;1&gt;</Title>"));
+
+        packer.pack_to(PackagingFormat::Zip, &out_cbz).unwrap();
+        let zip = zip::ZipArchive::new(std::fs::File::open(&out_cbz).unwrap()).unwrap();
+        assert_eq!(zip.len(), 2);
+
+        // Edge cases for format_download_path and extract_chapter_number
+        assert_eq!(extract_chapter_number("Prologue"), None);
+        assert_eq!(extract_chapter_number("Tome 3.5"), Some("3.5".into()));
+        assert_eq!(extract_chapter_number("Ep. 12"), Some("12".into()));
+
+        let base = Path::new("dl");
+        let p_default = format_download_path(base, "   ", "Manga", "Ch 1", "1", "ModX", ".cbz");
+        assert_eq!(p_default, Path::new("dl/Manga/Ch 1.cbz"));
+        let p_mod = format_download_path(
+            base,
+            "{module}/{manga} - {number}",
+            "...Solo...\0\r\n",
+            "Ch 2",
+            "2",
+            "ModX",
+            "cbz",
+        );
+        assert_eq!(p_mod, Path::new("dl/ModX/_.Solo_.___ - 2.cbz"));
+        let p_dots = format_download_path(base, "{manga}/{chapter}", "...", ".", "1", "M", "cbz");
+        assert_eq!(p_dots, Path::new("dl/_/_.cbz"));
+    }
 }

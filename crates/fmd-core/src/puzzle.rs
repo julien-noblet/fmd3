@@ -131,4 +131,86 @@ mod tests {
         assert_eq!(res.width(), 100);
         assert_eq!(res.height(), 100);
     }
+
+    #[test]
+    fn test_puzzle_reorders_tiles_at_exact_pixel_coordinates() {
+        // 4x4 image split into 2x2 grid of 2x2 tiles
+        let mut img = RgbaImage::new(4, 4);
+        let red = Rgba([255, 0, 0, 255]);
+        let green = Rgba([0, 255, 0, 255]);
+        let blue = Rgba([0, 0, 255, 255]);
+        let yellow = Rgba([255, 255, 0, 255]);
+
+        for y in 0..2 {
+            for x in 0..2 {
+                img.put_pixel(x, y, red); // src block 0
+                img.put_pixel(x + 2, y, green); // src block 1
+                img.put_pixel(x, y + 2, blue); // src block 2
+                img.put_pixel(x + 2, y + 2, yellow); // src block 3
+            }
+        }
+
+        let mut puzzle = ImagePuzzle::new(2, 2);
+        // src 0 -> dst 3, src 1 -> dst 2, src 2 -> dst 1, src 3 -> dst 0
+        puzzle.set_matrix(vec![3, 2, 1, 0]);
+        let out = puzzle
+            .descramble_image(&DynamicImage::ImageRgba8(img))
+            .unwrap()
+            .to_rgba8();
+
+        assert_eq!(*out.get_pixel(0, 0), yellow); // dst 0
+        assert_eq!(*out.get_pixel(2, 0), blue); // dst 1
+        assert_eq!(*out.get_pixel(0, 2), green); // dst 2
+        assert_eq!(*out.get_pixel(2, 2), red); // dst 3
+    }
+
+    #[test]
+    fn test_puzzle_flips_multiply_bytes_and_errors() {
+        // 4x4 image, 1x1 block (whole image) to test horizontal + vertical + combined flips
+        let mut img = RgbaImage::new(4, 4);
+        let marker = Rgba([10, 200, 30, 255]);
+        img.put_pixel(0, 0, marker);
+
+        let mut p_h = ImagePuzzle::new(1, 1);
+        p_h.set_flips(vec![1]);
+        let out_h = p_h
+            .descramble_image(&DynamicImage::ImageRgba8(img.clone()))
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(*out_h.get_pixel(3, 0), marker);
+
+        let mut p_v = ImagePuzzle::new(1, 1);
+        p_v.set_flips(vec![2]);
+        let out_v = p_v
+            .descramble_image(&DynamicImage::ImageRgba8(img.clone()))
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(*out_v.get_pixel(0, 3), marker);
+
+        let mut p_hv = ImagePuzzle::new(1, 1);
+        p_hv.set_flips(vec![3]);
+        p_hv.multiply = 2;
+        let mut png_in = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(img)
+            .write_to(&mut png_in, ImageFormat::Png)
+            .unwrap();
+        let png_out = p_hv
+            .descramble_bytes(&png_in.into_inner(), ImageFormat::Png)
+            .unwrap();
+        let decoded = image::load_from_memory(&png_out).unwrap().to_rgba8();
+        assert_eq!(*decoded.get_pixel(3, 3), marker);
+
+        // Error cases
+        let mut bad_len = ImagePuzzle::new(2, 2);
+        bad_len.set_matrix(vec![0, 1]);
+        assert!(bad_len
+            .descramble_image(&DynamicImage::ImageRgba8(decoded.clone()))
+            .is_err());
+
+        let mut bad_idx = ImagePuzzle::new(2, 2);
+        bad_idx.set_matrix(vec![0, 1, 2, 9]);
+        assert!(bad_idx
+            .descramble_image(&DynamicImage::ImageRgba8(decoded))
+            .is_err());
+    }
 }
