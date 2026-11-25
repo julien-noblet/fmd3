@@ -2699,7 +2699,7 @@ impl Database {
         let rows = db_query_as_fetch_all!(
             self,
             (String, String, String, String, String, String, i64, i64),
-            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, 0, COALESCE(max_retries, 3) FROM downloads WHERE status = 'Failed'",
+            "SELECT id, manga_title, chapter_title, chapter_url, module_id, format, CAST(0 AS BIGINT), COALESCE(max_retries, 3) FROM downloads WHERE status = 'Failed'",
         )?;
         Ok(rows)
     }
@@ -3181,64 +3181,5 @@ mod tests {
             Database::resolve_url(Some("postgres://pg/fmd"), "data/fmd.db"),
             "postgres://pg/fmd"
         );
-    }
-
-    #[tokio::test]
-    async fn test_postgres_backend_if_configured() {
-        let Ok(url) = std::env::var("FMD_TEST_POSTGRES_URL") else {
-            return;
-        };
-        let db = Database::connect(&url).await.unwrap();
-        assert!(db.is_postgres());
-
-        let items = vec![("Solo Leveling".to_string(), "novel/Solo.html".to_string())];
-        db.upsert_catalog_items("pg-test-mod", &items)
-            .await
-            .unwrap();
-        let (found, total) = db
-            .search_catalog("Solo", Some("pg-test-mod"), 10, 0)
-            .await
-            .unwrap();
-        assert!(total >= 1);
-        assert!(found.iter().any(|i| i.title == "Solo Leveling"));
-
-        // Favorites, downloads & cleanup
-        db.add_or_update_favorite(
-            "pg-test-mod:solo",
-            "pg-test-mod",
-            "Solo Leveling",
-            "https://example.com/solo",
-            None,
-            true,
-            "CBZ",
-        )
-        .await
-        .unwrap();
-        let favs = db.list_favorites_with_stats().await.unwrap();
-        assert!(favs.iter().any(|f| f.manga_id == "pg-test-mod:solo"));
-
-        let dl_id = format!("pg-dl-{}", uuid::Uuid::new_v4());
-        db.queue_download(
-            &dl_id,
-            "Solo Leveling",
-            "Ch. 1",
-            "https://example.com/solo/1",
-            "pg-test-mod",
-            "CBZ",
-            3,
-        )
-        .await
-        .unwrap();
-        let dls = db.list_downloads_with_created_at(10).await.unwrap();
-        assert!(dls.iter().any(|d| d.0 == dl_id));
-        db.delete_download(&dl_id).await.unwrap();
-        db.delete_favorite("pg-test-mod:solo").await.unwrap();
-
-        // Demo slot schema isolation + cleanup
-        let slot_db = Database::new_demo_slot(Some(&url)).await.unwrap();
-        assert!(slot_db.is_postgres());
-        assert_eq!(slot_db.count_mangas().await.unwrap(), 0);
-        slot_db.close().await;
-        assert!(slot_db.is_closed());
     }
 }

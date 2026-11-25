@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   test-and-lint:
-    name: Rust Checks & Hermetic Tests
+    name: Rust, Helm, Treefmt & PG/NATS Integration
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -33,12 +33,86 @@ jobs:
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run Checks & Tests
-        run: devenv test
+      - name: Run Checks & Integration Tests
+        run: devenv --no-tui test
+
+  e2e-playwright:
+    name: Playwright Browser E2E
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: devenv
+
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('e2e/package-lock.json') }}
+
+      - name: Install E2E Dependencies & Chromium
+        run: |
+          devenv --no-tui shell -- npm --prefix e2e ci
+          devenv --no-tui shell -- npx --prefix e2e playwright install --with-deps chromium
+
+      - name: Run Playwright E2E Suite
+        run: devenv --no-tui shell -- test-e2e
+
+      - name: Upload Playwright Report on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 7
+
+  coverage:
+    name: Code Coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: devenv
+
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate Coverage & Enforce Threshold
+        run: devenv --no-tui shell -- coverage
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-coverage
+          path: lcov.info
+          retention-days: 14
 
   docker-build:
     name: Build & Publish Docker Multi-Arch (amd64 / arm64)
-    needs: test-and-lint
+    needs: [test-and-lint, e2e-playwright]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     steps:

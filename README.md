@@ -206,13 +206,32 @@ helm install fmd3 ./charts/fmd3 \
 
 ## 🧪 Testing & Verification
 
-Run the hermetic integration test suite across the entire workspace:
+Run the hermetic unit and integration test suite across the entire workspace:
 
 ```bash
 cargo test --workspace
 ```
 
-Continuous integration runs on GitHub Actions on every pull request with formatting, Clippy, hermetic WireMock tests, and multi-architecture Docker container builds (`linux/amd64`, `linux/arm64`).
+Inside the `devenv` environment, additional verification commands are available:
+
+- **Full local/CI check suite** (Treefmt formatting, Clippy, workspace tests, Helm lint/template, and isolated PostgreSQL + NATS JetStream integration tests):
+  ```bash
+  devenv test
+  ```
+- **Individual checks & integration suites**:
+  ```bash
+  devenv shell -- check             # treefmt --fail-on-change, clippy, cargo test, check-helm
+  devenv shell -- test-integration  # PostgreSQL & NATS JetStream integration suites
+  devenv shell -- check-helm        # helm lint & helm template matrix
+  devenv shell -- coverage          # cargo-llvm-cov LCOV report (--fail-under-lines 70)
+  ```
+- **Playwright Browser E2E suite** (`e2e/`):
+  ```bash
+  npm --prefix e2e ci               # first time (non-NixOS also: npx --prefix e2e playwright install chromium)
+  devenv shell -- test-e2e
+  ```
+
+Continuous integration runs on GitHub Actions with `test-and-lint` (`devenv --no-tui test`), `e2e-playwright`, `coverage`, and multi-architecture Docker container builds (`linux/amd64`, `linux/arm64`).
 
 ---
 
